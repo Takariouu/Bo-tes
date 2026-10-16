@@ -1,0 +1,39 @@
+# Désactiver le listage des répertoires
+Options -Indexes
+
+# Activer le moteur de réécriture d'URL
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /
+
+    # Bloquer l'accès direct aux fichiers cachés (.git, .env, .htaccess)
+    RewriteRule (^\.|/\.) - [F,L]
+
+    # Bloquer l'accès direct aux dossiers critiques et données physiques
+    RewriteRule ^(config|src|backups|donnees_serveurs|uploads|includes)(/.*)?$ - [F,L]
+
+    # Masquer l'extension .php si l'utilisateur la tape manuellement (Redirection 301)
+    RewriteCond %{THE_REQUEST} \s/+(.+?)\.php[\s?] [NC]
+    RewriteRule ^ /%1 [R=301,L,NE]
+
+    # Laisser passer les fichiers statiques existants (CSS, JS, Images, Polices)
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Rediriger toutes les routes propres vers le contrôleur frontal index.php
+    RewriteRule ^([a-zA-Z0-9_-]+)/?$ index.php?page=$1 [QSA,L]
+</IfModule>
+
+# En-têtes de sécurité HTTP
+<IfModule mod_headers.c>
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-Frame-Options "SAMEORIGIN"
+    Header set Referrer-Policy "strict-origin-when-cross-origin"
+    Header set X-XSS-Protection "1; mode=block"
+</IfModule>
+
+# Bloquer l'accès aux fichiers SQL, log, jar et archives de sauvegarde
+<FilesMatch "\.(sql|log|jar|gz|tar|zip|rar|sh|env)$">
+    Require all denied
+</FilesMatch>
