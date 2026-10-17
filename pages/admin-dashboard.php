@@ -84,7 +84,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $db->prepare('DELETE FROM ADMINISTRER_SERVEUR WHERE SVR_ID = :svr_id')->execute([':svr_id' =>$sId]);
                         $db->prepare('DELETE FROM ETRE_LISTER WHERE SVR_ID = :svr_id')->execute([':svr_id' =>$sId]);
                         $db->prepare('DELETE FROM CONNEXION_JOUEUR WHERE SVR_ID = :svr_id')->execute([':svr_id' =>$sId]);
-                        $db->prepare('DELETE FROM AVOIR_HISTORIQUE WHERE SVR_ID = :svr_id')->execute([':svr_id' =>$sId]);
+                        $db->prepare('DELETE FROM HISTORIQUE_RESSOURCE WHERE SVR_ID = :svr_id')->execute([':svr_id' =>$sId]);
                         $db->prepare('DELETE FROM EVALUATION_SERVEUR WHERE SVR_ID = :svr_id')->execute([':svr_id' =>$sId]);
                         $db->prepare('DELETE FROM SIGNALEMENT_SERVEUR WHERE SVR_ID = :svr_id')->execute([':svr_id' =>$sId]);
                         $db->prepare('DELETE FROM SERVEUR WHERE SVR_ID = :svr_id')->execute([':svr_id' =>$sId]);
