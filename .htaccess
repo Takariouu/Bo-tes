@@ -1,0 +1,29 @@
+Options -Indexes -MultiViews
+ServerSignature Off
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set X-XSS-Protection "1; mode=block"
+</IfModule>
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /
+
+    # Blocage de l'accès aux fichiers cachés (.git, .env, .htaccess)
+    RewriteRule (?:^|/)\. - [F,L]
+
+    # Interdiction formelle d'accéder directement aux dossiers internes et sensibles
+    RewriteRule ^(config|src|includes|pages|backups)(/.*)?$ - [F,L,NC]
+
+    # Autoriser l'accès direct aux ressources statiques existantes (assets, images, scripts)
+    RewriteCond %{REQUEST_FILENAME} -f
+    RewriteRule ^assets/ - [L]
+
+    # Redirection de toutes les requêtes vers le contrôleur frontal unique
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^(.*)$ index.php?page=$1 [QSA,L]
+</IfModule>
