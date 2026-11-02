@@ -16,8 +16,12 @@ $serverId      = isset($activeServerId) && is_int($activeServerId)
     ? $activeServerId
     : Security::validatePositiveInt($_GET['id'] ?? $_POST['server_id'] ?? null);
 $currentUserId = Auth::getUserId();
+$accessLevel   = $serverId !== null && $currentUserId !== null
+    ? Auth::getServerAccessLevel($currentUserId, $serverId, $db)
+    : null;
+$canConfigure  = Auth::serverLevelAllows($accessLevel, Auth::SERVER_PERM_FULL);
 
-if ($serverId === null || $currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)) {
+if ($serverId === null || $currentUserId === null || $accessLevel === null) {
     http_response_code(403);
     ?>
     <section class="server-map server-map--forbidden">
@@ -47,6 +51,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!Security::verifyCsrfToken($postCsrf)) {
         $feedbackError = 'Jeton CSRF invalide.';
+    } elseif ($action === 'save_map_config' && !$canConfigure) {
+        $feedbackError = Auth::serverPermissionError($accessLevel);
     } elseif ($action === 'save_map_config') {
         $estActive        = isset($_POST['est_active']) && $_POST['est_active'] === '1' ? 1 : 0;
         $modeRendu        = in_array($_POST['mode_rendu'] ?? '3D', ['2D', '3D'], true) ? (string) $_POST['mode_rendu'] : '3D';
@@ -54,45 +60,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $afficherMarqueurs= isset($_POST['afficher_marqueurs']) && $_POST['afficher_marqueurs'] === '1' ? 1 : 0;
         $portMap          = Security::validatePort($_POST['port_map'] ?? ((int) $server['port'] + 1000)) ?? ((int) $server['port'] + 1000);
 
-        try {
-            $stmt = $db->prepare('
-                INSERT INTO CONFIGURATION_MAP (
-                    id_serveur,
-                    est_active,
-                    mode_rendu,
-                    afficher_joueurs,
-                    afficher_marqueurs,
-                    port_map,
-                    date_maj
-                ) VALUES (
-                    :sid,
-                    :active,
-                    :mode,
-                    :joueurs,
-                    :marqueurs,
-                    :port,
-                    NOW()
-                )
-                ON DUPLICATE KEY UPDATE
-                    est_active = VALUES(est_active),
-                    mode_rendu = VALUES(mode_rendu),
-                    afficher_joueurs = VALUES(afficher_joueurs),
-                    afficher_marqueurs = VALUES(afficher_marqueurs),
-                    port_map = VALUES(port_map),
-                    date_maj = NOW()
-            ');
-            $stmt->execute([
-                ':sid'       => $serverId,
-                ':active'    => $estActive,
-                ':mode'      => $modeRendu,
-                ':joueurs'   => $afficherJoueurs,
-                ':marqueurs' => $afficherMarqueurs,
-                ':port'      => $portMap,
-            ]);
-            $feedbackMessage = 'Configuration de la Map interactive enregistrée.';
-        } catch (PDOException $e) {
-            error_log(sprintf('[Boötes][Map] Erreur sauvegarde CONFIGURATION_MAP : %s', $e->getMessage()));
-            $feedbackError = 'Impossible d\'enregistrer la configuration de la carte.';
+        if (!$serverManager->isMapPortAvailable($serverId, $portMap)) {
+            $feedbackError = sprintf(
+                'Port de carte refusé : choisissez un port libre entre %d et %d.',
+                ServerManager::MAP_PORT_RANGE_START,
+                ServerManager::MAP_PORT_RANGE_END
+            );
+        } else {
+            try {
+                $stmt = $db->prepare('
+                    INSERT INTO CONFIGURATION_MAP (
+                        id_serveur,
+                        est_active,
+                        mode_rendu,
+                        afficher_joueurs,
+                        afficher_marqueurs,
+                        port_map,
+                        date_maj
+                    ) VALUES (
+                        :sid,
+                        :active,
+                        :mode,
+                        :joueurs,
+                        :marqueurs,
+                        :port,
+                        NOW()
+                    )
+                    ON DUPLICATE KEY UPDATE
+                        est_active = VALUES(est_active),
+                        mode_rendu = VALUES(mode_rendu),
+                        afficher_joueurs = VALUES(afficher_joueurs),
+                        afficher_marqueurs = VALUES(afficher_marqueurs),
+                        port_map = VALUES(port_map),
+                        date_maj = NOW()
+                ');
+                $stmt->execute([
+                    ':sid'       => $serverId,
+                    ':active'    => $estActive,
+                    ':mode'      => $modeRendu,
+                    ':joueurs'   => $afficherJoueurs,
+                    ':marqueurs' => $afficherMarqueurs,
+                    ':port'      => $portMap,
+                ]);
+                $feedbackMessage = 'Configuration de la Map interactive enregistrée.';
+            } catch (PDOException $e) {
+                error_log(sprintf('[Boötes][Map] Erreur sauvegarde CONFIGURATION_MAP : %s', $e->getMessage()));
+                $feedbackError = 'Impossible d\'enregistrer la configuration de la carte.';
+            }
         }
     }
 }
@@ -203,6 +217,7 @@ $mapPort      = (int) $mapConfig['port_map'];
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
                 <input type="hidden" name="action" value="save_map_config">
+                <fieldset class="map-config-form__fieldset" <?= $canConfigure ? '' : 'disabled' ?>>
 
                 <div class="map-config-form__field map-config-form__field--checkbox">
                     <input
@@ -277,13 +292,15 @@ $mapPort      = (int) $mapConfig['port_map'];
                 </div>
 
                 <div class="map-config-form__field">
-                    <label for="map-port" class="map-config-form__label">Port dédié au flux Map</label>
+                    <label for="map-port" class="map-config-form__label">
+                        Port dédié au flux Map (<?= ServerManager::MAP_PORT_RANGE_START ?>–<?= ServerManager::MAP_PORT_RANGE_END ?>)
+                    </label>
                     <input
                         type="number"
                         id="map-port"
                         name="port_map"
-                        min="1024"
-                        max="65535"
+                        min="<?= ServerManager::MAP_PORT_RANGE_START ?>"
+                        max="<?= ServerManager::MAP_PORT_RANGE_END ?>"
                         value="<?= $mapPort ?>"
                         required
                         class="map-config-form__input"
@@ -291,6 +308,7 @@ $mapPort      = (int) $mapConfig['port_map'];
                 </div>
 
                 <button type="submit" class="map-config-form__submit">Enregistrer la configuration</button>
+                </fieldset>
             </form>
         </aside>
     </div>

@@ -18,8 +18,13 @@ $serverId      = isset($activeServerId) && is_int($activeServerId)
     ? $activeServerId
     : Security::validatePositiveInt($_GET['id'] ?? $_POST['server_id'] ?? null);
 $currentUserId = Auth::getUserId();
+$accessLevel   = $serverId !== null && $currentUserId !== null
+    ? Auth::getServerAccessLevel($currentUserId, $serverId, $db)
+    : null;
+$canOperate    = Auth::serverLevelAllows($accessLevel, Auth::SERVER_PERM_CONSOLE);
+$canConfigure  = Auth::serverLevelAllows($accessLevel, Auth::SERVER_PERM_FULL);
 
-if ($serverId === null || $currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)) {
+if ($serverId === null || $currentUserId === null || $accessLevel === null) {
     http_response_code(403);
     ?>
     <section class="server-dashboard server-dashboard--forbidden">
@@ -46,8 +51,20 @@ if ($server === null) {
     return;
 }
 
-$isOwnerOrAdmin = ((int) $server['id_proprietaire'] === $currentUserId) || Auth::isAdmin();
-$allowPremium   = (strtoupper((string) $server['proprietaire_offre']) === Auth::ACCOUNT_PREMIUM) || Auth::isAdmin();
+$ramCeiling = Auth::isAdmin()
+    ? ServerManager::HOST_MAX_MC_RAM_MB
+    : ServerManager::ramCeilingFor((string) $server['proprietaire_offre'], (int) $server['proprietaire_max_ram']);
+
+// Niveau minimal requis par action : CONSOLE pour le cycle de vie, COMPLET pour la configuration.
+$actionPermissions = [
+    'start'                  => Auth::SERVER_PERM_CONSOLE,
+    'stop'                   => Auth::SERVER_PERM_CONSOLE,
+    'restart'                => Auth::SERVER_PERM_CONSOLE,
+    'force_kill'             => Auth::SERVER_PERM_OWNER,
+    'update_settings'        => Auth::SERVER_PERM_FULL,
+    'quick_install_resource' => Auth::SERVER_PERM_FULL,
+    'uninstall_resource'     => Auth::SERVER_PERM_FULL,
+];
 
 // Traitement des actions POST (Cycle de vie, Paramètres, Installation rapide de ressources)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -56,6 +73,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!Security::verifyCsrfToken($postCsrf)) {
         $feedbackError = 'Jeton CSRF invalide ou expiré. Veuillez réessayer.';
+    } elseif (isset($actionPermissions[$action]) && !Auth::serverLevelAllows($accessLevel, $actionPermissions[$action])) {
+        $feedbackError = Auth::serverPermissionError($accessLevel);
     } else {
         switch ($action) {
             case 'start':
@@ -104,7 +123,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $estPublic  = isset($_POST['est_public']) && $_POST['est_public'] === '1';
                 $desc       = Security::validateString($_POST['description'] ?? '', 0, 1000) ?? '';
 
-                if ($serverManager->updateServerSettings(
+                $res = $serverManager->updateServerSettings(
                     $serverId,
                     $nom,
                     $versionMc,
@@ -114,11 +133,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $ramAllouee,
                     $estPublic,
                     $desc,
-                    $allowPremium
-                )) {
-                    $feedbackMessage = 'Configuration du serveur enregistrée avec succès.';
+                    Auth::isAdmin()
+                );
+                if ($res['success']) {
+                    $feedbackMessage = $res['message'];
                 } else {
-                    $feedbackError = 'Paramètres invalides ou allocation RAM supérieure au plafond de votre offre.';
+                    $feedbackError = $res['message'];
                 }
                 break;
 
@@ -126,17 +146,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $resId = Security::validatePositiveInt($_POST['resource_id'] ?? null);
                 if ($resId !== null) {
                     try {
-                        $insStmt = $db->prepare('
-                            INSERT INTO INSTALLER_RESSOURCE (id_serveur, id_ressource, date_installation)
-                            VALUES (:sid, :rid, NOW())
-                            ON DUPLICATE KEY UPDATE date_installation = NOW()
-                        ');
-                        $insStmt->execute([':sid' => $serverId, ':rid' => $resId]);
-
-                        $db->prepare('UPDATE RESSOURCE SET nb_telechargements = nb_telechargements + 1 WHERE id_ressource = :rid')
-                           ->execute([':rid' => $resId]);
-
-                        $feedbackMessage = 'Ressource installée avec succès sur l\'instance. Redémarrez le serveur pour l\'activer.';
+                        $res = (new ResourceManager($db))->installOnServer($serverId, $resId);
+                        if ($res['success']) {
+                            $feedbackMessage = $res['message'];
+                        } else {
+                            $feedbackError = $res['message'];
+                        }
                     } catch (PDOException $e) {
                         error_log(sprintf('[Boötes][Dashboard] Erreur installation ressource : %s', $e->getMessage()));
                         $feedbackError = 'Impossible d\'installer cette ressource.';
@@ -213,7 +228,7 @@ try {
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
                 <input type="hidden" name="action" value="start">
-                <button type="submit" class="server-dashboard__btn server-dashboard__btn--start" <?= $isOnline ? 'disabled' : '' ?>>
+                <button type="submit" class="server-dashboard__btn server-dashboard__btn--start" <?= $isOnline || !$canOperate ? 'disabled' : '' ?>>
                     Démarrer
                 </button>
             </form>
@@ -222,7 +237,7 @@ try {
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
                 <input type="hidden" name="action" value="restart">
-                <button type="submit" class="server-dashboard__btn server-dashboard__btn--restart" <?= !$isOnline ? 'disabled' : '' ?>>
+                <button type="submit" class="server-dashboard__btn server-dashboard__btn--restart" <?= !$isOnline || !$canOperate ? 'disabled' : '' ?>>
                     Redémarrer
                 </button>
             </form>
@@ -231,7 +246,7 @@ try {
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
                 <input type="hidden" name="action" value="stop">
-                <button type="submit" class="server-dashboard__btn server-dashboard__btn--stop" <?= !$isOnline ? 'disabled' : '' ?>>
+                <button type="submit" class="server-dashboard__btn server-dashboard__btn--stop" <?= !$isOnline || !$canOperate ? 'disabled' : '' ?> data-confirm="Arrêter le serveur ? Les joueurs connectés seront déconnectés.">
                     Arrêter
                 </button>
             </form>
@@ -241,13 +256,20 @@ try {
                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                     <input type="hidden" name="server_id" value="<?= $serverId ?>">
                     <input type="hidden" name="action" value="force_kill">
-                    <button type="submit" class="server-dashboard__btn server-dashboard__btn--kill" title="Réservé aux Administrateurs Boötes">
+                    <button type="submit" class="server-dashboard__btn server-dashboard__btn--kill" title="Réservé aux Administrateurs Boötes" data-confirm="Forcer l'arrêt immédiat (SIGKILL) ? Les données non sauvegardées seront perdues.">
                         Arrêt Forcé (SIGKILL)
                     </button>
                 </form>
             <?php endif; ?>
         </div>
     </header>
+
+    <?php if (!$canConfigure): ?>
+        <p class="server-dashboard__notice" role="note">
+            Accès co-administrateur <strong><?= Security::e((string) $accessLevel) ?></strong> :
+            <?= $canOperate ? 'démarrage, arrêt et console autorisés ; configuration en lecture seule.' : 'consultation uniquement.' ?>
+        </p>
+    <?php endif; ?>
 
     <?php if ($feedbackMessage !== null): ?>
         <div class="server-dashboard__alert server-dashboard__alert--success" role="status">
@@ -291,6 +313,7 @@ try {
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
                 <input type="hidden" name="action" value="update_settings">
+                <fieldset class="server-settings-form__fieldset" <?= $canConfigure ? '' : 'disabled' ?>>
 
                 <div class="server-settings-form__field">
                     <label for="cfg-nom" class="server-settings-form__label">Nom du serveur</label>
@@ -331,9 +354,9 @@ try {
                 <div class="server-settings-form__field">
                     <label for="cfg-mode" class="server-settings-form__label">Mode de jeu</label>
                     <select id="cfg-mode" name="mode_jeu" class="server-settings-form__select">
-                        <?php foreach (['SURVIE', 'CREATIF', 'HARDCORE', 'AVENTURE', 'MODDE'] as $mode): ?>
+                        <?php foreach (ServerManager::GAME_MODES as $mode => $modeLabel): ?>
                             <option value="<?= Security::e($mode) ?>" <?= strtoupper((string) $server['mode_jeu']) === $mode ? 'selected' : '' ?>>
-                                <?= Security::e($mode) ?>
+                                <?= Security::e($modeLabel) ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
@@ -346,7 +369,7 @@ try {
                         id="cfg-slots"
                         name="slots_max"
                         min="2"
-                        max="200"
+                        max="<?= ServerManager::MAX_SLOTS ?>"
                         value="<?= (int) $server['slots_max'] ?>"
                         required
                         class="server-settings-form__input"
@@ -355,14 +378,14 @@ try {
 
                 <div class="server-settings-form__field">
                     <label for="cfg-ram" class="server-settings-form__label">
-                        Mémoire RAM dédiée (Mo) — Plafond autorisé : <?= $allowPremium ? '6144 Mo (Premium/Admin)' : '2048 Mo (Standard)' ?>
+                        Mémoire RAM dédiée (Mo) — Plafond autorisé : <?= $ramCeiling ?> Mo<?= $isOnline ? ' (modifiable une fois le serveur arrêté)' : '' ?>
                     </label>
                     <input
                         type="number"
                         id="cfg-ram"
                         name="ram_allouee"
                         min="512"
-                        max="<?= $allowPremium ? 6144 : 2048 ?>"
+                        max="<?= max(512, $ramCeiling) ?>"
                         step="256"
                         value="<?= (int) $server['ram_allouee'] ?>"
                         required
@@ -396,6 +419,7 @@ try {
                 </div>
 
                 <button type="submit" class="server-settings-form__submit">Enregistrer les paramètres</button>
+                </fieldset>
             </form>
         </section>
 
@@ -403,6 +427,7 @@ try {
         <section class="server-dashboard__panel" aria-labelledby="addons-title">
             <h2 id="addons-title" class="server-dashboard__panel-title">Mods, Plugins et Modpacks</h2>
 
+            <?php if ($canConfigure): ?>
             <form action="/serveur/dashboard?id=<?= $serverId ?>" method="post" class="quick-install-form">
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
@@ -429,6 +454,7 @@ try {
                     </div>
                 <?php endif; ?>
             </form>
+            <?php endif; ?>
 
             <h3 class="server-dashboard__subtitle">Ressources actuellement installées (<?= count($installedItems) ?>)</h3>
             <?php if (empty($installedItems)): ?>
@@ -444,6 +470,7 @@ try {
                                 </a>
                                 <small class="installed-list__meta">(MC <?= Security::e((string) $inst['version_compatible']) ?>)</small>
                             </div>
+                            <?php if ($canConfigure): ?>
                             <form action="/serveur/dashboard?id=<?= $serverId ?>" method="post" class="installed-list__form">
                                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
@@ -451,6 +478,7 @@ try {
                                 <input type="hidden" name="resource_id" value="<?= (int) $inst['id_ressource'] ?>">
                                 <button type="submit" class="installed-list__remove-btn">Désinstaller</button>
                             </form>
+                            <?php endif; ?>
                         </li>
                     <?php endforeach; ?>
                 </ul>

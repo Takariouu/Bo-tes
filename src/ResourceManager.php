@@ -4,12 +4,21 @@ declare(strict_types=1);
 
 namespace Bootes\Src;
 
+use Bootes\Config\AppConfig;
 use PDO;
 use PDOException;
 use InvalidArgumentException;
+use ZipArchive;
 
 final class ResourceManager
 {
+    public const ALLOWED_ARCHIVE_EXTENSIONS = [
+        'jar'    => 'application/java-archive',
+        'zip'    => 'application/zip',
+        'mrpack' => 'application/zip',
+    ];
+    public const MAX_ARCHIVE_SIZE_BYTES = 104857600; // 100 Mo
+
     public const TYPE_MOD     = 'MOD';
     public const TYPE_PLUGIN  = 'PLUGIN';
     public const TYPE_MODPACK = 'MOD_PACK';
@@ -330,14 +339,26 @@ final class ResourceManager
     }
 
     /**
-     * Supprime définitivement une ressource et ses dépendances (fichiers versionnés, avis, installations).
+     * Une ressource n'est visible et installable publiquement qu'une fois validée par la modération.
+     *
+     * @param array<string, mixed> $resource
      */
-    public function deleteResource(int $resourceId): bool
+    public static function isPubliclyAvailable(array $resource): bool
+    {
+        return ($resource['statut_moderation'] ?? '') === self::STATUS_VALIDE;
+    }
+
+    /**
+     * Supprime définitivement une ressource et ses dépendances (fichiers versionnés, avis, installations).
+     * Si $purgeFiles est faux (transaction englobante), l'appelant efface les archives après validation.
+     */
+    public function deleteResource(int $resourceId, bool $purgeFiles = true): bool
     {
         if ($resourceId <= 0) {
             return false;
         }
 
+        $storedFiles    = $this->getStoredFilePaths($resourceId);
         $ownTransaction = !$this->db->inTransaction();
         if ($ownTransaction) {
             $this->db->beginTransaction();
@@ -358,12 +379,17 @@ final class ResourceManager
 
             $delStmt = $this->db->prepare('DELETE FROM RESSOURCE WHERE id_ressource = :id');
             $delStmt->execute([':id' => $resourceId]);
+            $deleted = $delStmt->rowCount() > 0;
 
             if ($ownTransaction) {
                 $this->db->commit();
             }
 
-            return $delStmt->rowCount() > 0;
+            if ($purgeFiles && $deleted) {
+                $this->purgeStoredFiles($storedFiles);
+            }
+
+            return $deleted;
         } catch (PDOException $e) {
             if ($ownTransaction && $this->db->inTransaction()) {
                 $this->db->rollBack();
@@ -371,20 +397,6 @@ final class ResourceManager
             error_log(sprintf('[Boötes][ResourceManager] Erreur suppression ressource #%d : %s', $resourceId, $e->getMessage()));
             return false;
         }
-    }
-
-    /**
-     * Supprime toutes les ressources d'un utilisateur (droit à l'oubli RGPD - option suppression totale).
-     */
-    public function deleteUserResources(int $userId): bool
-    {
-        $resources = $this->getResourcesByUser($userId);
-        foreach ($resources as $res) {
-            if (!$this->deleteResource((int) $res['id_ressource'])) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /**
@@ -536,13 +548,17 @@ final class ResourceManager
     }
 
     /**
-     * Supprime une version spécifique de fichier associée à une ressource.
+     * Supprime une version spécifique de fichier associée à une ressource (base et disque).
      */
     public function deleteVersionFile(int $fileId, int $resourceId): bool
     {
         if ($fileId <= 0 || $resourceId <= 0) {
             return false;
         }
+
+        $pathStmt = $this->db->prepare('SELECT chemin_fichier FROM FICHIER_RESSOURCE WHERE id_fichier = :file_id AND id_ressource = :res_id');
+        $pathStmt->execute([':file_id' => $fileId, ':res_id' => $resourceId]);
+        $storedPath = $pathStmt->fetchColumn();
 
         $stmt = $this->db->prepare('
             DELETE FROM FICHIER_RESSOURCE
@@ -553,7 +569,209 @@ final class ResourceManager
             ':res_id'  => $resourceId,
         ]);
 
-        return $stmt->rowCount() > 0;
+        if ($stmt->rowCount() === 0) {
+            return false;
+        }
+
+        if ($storedPath !== false) {
+            $this->purgeStoredFiles([(string) $storedPath]);
+        }
+
+        return true;
+    }
+
+    /**
+     * Valide une archive téléversée (taille, extension, signature ZIP réelle) puis la déplace
+     * dans le stockage privé sous un nom aléatoire ne contenant aucune donnée fournie par l'utilisateur.
+     *
+     * @param mixed $upload Entrée de $_FILES
+     * @return array{success: bool, message: string, stored_name?: string, original_name?: string, size?: int}
+     */
+    public function storeUploadedArchive(mixed $upload, int $resourceId): array
+    {
+        if (!is_array($upload) || !isset($upload['error'], $upload['tmp_name'], $upload['name']) || is_array($upload['error'])) {
+            return ['success' => false, 'message' => 'Veuillez sélectionner un fichier (.jar, .zip ou .mrpack) à téléverser.'];
+        }
+
+        $error = (int) $upload['error'];
+        if ($error === UPLOAD_ERR_INI_SIZE || $error === UPLOAD_ERR_FORM_SIZE) {
+            return ['success' => false, 'message' => 'Le fichier dépasse la taille maximale autorisée (100 Mo).'];
+        }
+        if ($error !== UPLOAD_ERR_OK) {
+            return ['success' => false, 'message' => 'Le téléversement a échoué, veuillez réessayer.'];
+        }
+
+        $tmpPath = (string) $upload['tmp_name'];
+        if (!is_uploaded_file($tmpPath)) {
+            return ['success' => false, 'message' => 'Fichier téléversé invalide.'];
+        }
+
+        $originalName = Security::validateString(basename((string) $upload['name']), 3, 255);
+        $extension    = strtolower(pathinfo((string) $originalName, PATHINFO_EXTENSION));
+        $fileSize     = (int) filesize($tmpPath);
+
+        if ($originalName === null || !array_key_exists($extension, self::ALLOWED_ARCHIVE_EXTENSIONS)) {
+            return ['success' => false, 'message' => 'Extension non autorisée. Seuls les fichiers .jar, .zip et .mrpack sont acceptés.'];
+        }
+        if ($fileSize <= 0 || $fileSize > self::MAX_ARCHIVE_SIZE_BYTES) {
+            return ['success' => false, 'message' => 'La taille du fichier est invalide ou dépasse la limite autorisée de 100 Mo.'];
+        }
+        if (!self::isZipArchive($tmpPath)) {
+            return ['success' => false, 'message' => 'Le contenu du fichier n\'est pas une archive ZIP valide (.jar, .zip et .mrpack sont des archives ZIP).'];
+        }
+
+        $directory = self::archiveDirectory();
+        if (!AppConfig::ensureDirectory($directory)) {
+            error_log('[Boötes][ResourceManager] Stockage des archives indisponible : ' . $directory);
+            return ['success' => false, 'message' => 'Le stockage des archives est indisponible. Contactez un administrateur.'];
+        }
+
+        $storedName = sprintf('res-%d-%s.%s', $resourceId, bin2hex(random_bytes(16)), $extension);
+        if (!move_uploaded_file($tmpPath, $directory . '/' . $storedName)) {
+            error_log('[Boötes][ResourceManager] Échec move_uploaded_file vers ' . $directory);
+            return ['success' => false, 'message' => 'L\'enregistrement du fichier a échoué. Aucune version n\'a été publiée.'];
+        }
+        @chmod($directory . '/' . $storedName, 0640);
+
+        return [
+            'success'       => true,
+            'message'       => 'Archive enregistrée.',
+            'stored_name'   => $storedName,
+            'original_name' => $originalName,
+            'size'          => $fileSize,
+        ];
+    }
+
+    /**
+     * Chemin absolu d'une archive du stockage privé à partir du chemin enregistré en base (null si absente).
+     */
+    public function resolveStoredFile(string $storedPath): ?string
+    {
+        $fileName = basename($storedPath);
+        if ($fileName === '' || $fileName === '.' || $fileName === '..') {
+            return null;
+        }
+
+        $path = self::archiveDirectory() . '/' . $fileName;
+
+        return is_file($path) ? $path : null;
+    }
+
+    /**
+     * @return array<int, string> Chemins enregistrés des archives d'une ressource
+     */
+    public function getStoredFilePaths(int $resourceId): array
+    {
+        $stmt = $this->db->prepare('SELECT chemin_fichier FROM FICHIER_RESSOURCE WHERE id_ressource = :res_id');
+        $stmt->execute([':res_id' => $resourceId]);
+
+        return array_map('strval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    /**
+     * @param array<int, string> $storedPaths
+     */
+    public function purgeStoredFiles(array $storedPaths): void
+    {
+        foreach ($storedPaths as $storedPath) {
+            $path = $this->resolveStoredFile($storedPath);
+            if ($path !== null) {
+                @unlink($path);
+            }
+        }
+    }
+
+    /**
+     * Dernière version publiée d'une ressource (null si aucun fichier).
+     */
+    public function getLatestVersionFile(int $resourceId): ?array
+    {
+        $stmt = $this->db->prepare('
+            SELECT id_fichier, nom_fichier, chemin_fichier
+            FROM FICHIER_RESSOURCE
+            WHERE id_ressource = :res_id
+            ORDER BY date_ajout DESC, id_fichier DESC
+            LIMIT 1
+        ');
+        $stmt->execute([':res_id' => $resourceId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return $row !== false ? $row : null;
+    }
+
+    /**
+     * Comptabilise un téléchargement sur la ressource et sur la version concernée.
+     */
+    public function registerDownload(int $resourceId, int $fileId): void
+    {
+        $this->db->prepare('UPDATE RESSOURCE SET nb_telechargements = nb_telechargements + 1 WHERE id_ressource = :id')
+                 ->execute([':id' => $resourceId]);
+        $this->db->prepare('UPDATE FICHIER_RESSOURCE SET nb_telechargements_version = COALESCE(nb_telechargements_version, 0) + 1 WHERE id_fichier = :fid')
+                 ->execute([':fid' => $fileId]);
+    }
+
+    /**
+     * Installe une ressource validée sur un serveur ; le compteur n'augmente qu'à la première installation.
+     *
+     * @return array{success: bool, message: string}
+     */
+    public function installOnServer(int $serverId, int $resourceId): array
+    {
+        $resource = $this->getResourceById($resourceId);
+        if ($resource === null || !self::isPubliclyAvailable($resource)) {
+            return ['success' => false, 'message' => 'Cette ressource est introuvable ou n\'est pas validée par la modération.'];
+        }
+
+        $existsStmt = $this->db->prepare('SELECT 1 FROM INSTALLER_RESSOURCE WHERE id_serveur = :sid AND id_ressource = :rid LIMIT 1');
+        $existsStmt->execute([':sid' => $serverId, ':rid' => $resourceId]);
+
+        if ($existsStmt->fetchColumn() !== false) {
+            $this->db->prepare('UPDATE INSTALLER_RESSOURCE SET date_installation = NOW() WHERE id_serveur = :sid AND id_ressource = :rid')
+                     ->execute([':sid' => $serverId, ':rid' => $resourceId]);
+        } else {
+            $this->db->prepare('INSERT INTO INSTALLER_RESSOURCE (id_serveur, id_ressource, date_installation) VALUES (:sid, :rid, NOW())')
+                     ->execute([':sid' => $serverId, ':rid' => $resourceId]);
+            $this->db->prepare('UPDATE RESSOURCE SET nb_telechargements = nb_telechargements + 1 WHERE id_ressource = :rid')
+                     ->execute([':rid' => $resourceId]);
+        }
+
+        return ['success' => true, 'message' => 'Ressource installée avec succès sur l\'instance. Redémarrez le serveur pour l\'activer.'];
+    }
+
+    private static function archiveDirectory(): string
+    {
+        return AppConfig::uploadsPath() . '/ressources';
+    }
+
+    /**
+     * Vérifie la signature ZIP (en-tête local « PK\x03\x04 ») et, si l'extension zip est présente, la structure complète.
+     */
+    private static function isZipArchive(string $path): bool
+    {
+        $handle = @fopen($path, 'rb');
+        if ($handle === false) {
+            return false;
+        }
+        $signature = (string) fread($handle, 4);
+        fclose($handle);
+
+        if ($signature !== "PK\x03\x04") {
+            return false;
+        }
+
+        if (!class_exists(ZipArchive::class)) {
+            return true;
+        }
+
+        $zip    = new ZipArchive();
+        $opened = $zip->open($path, ZipArchive::CHECKCONS);
+        if ($opened !== true) {
+            return false;
+        }
+        $hasEntries = $zip->numFiles > 0;
+        $zip->close();
+
+        return $hasEntries;
     }
 
     /**

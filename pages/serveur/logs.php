@@ -16,8 +16,11 @@ $serverId      = isset($activeServerId) && is_int($activeServerId)
     ? $activeServerId
     : Security::validatePositiveInt($_GET['id'] ?? null);
 $currentUserId = Auth::getUserId();
+$accessLevel   = $serverId !== null && $currentUserId !== null
+    ? Auth::getServerAccessLevel($currentUserId, $serverId, $db)
+    : null;
 
-if ($serverId === null || $currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)) {
+if ($serverId === null || $currentUserId === null || $accessLevel === null) {
     http_response_code(403);
     ?>
     <section class="server-logs server-logs--forbidden">
@@ -72,8 +75,8 @@ try {
     $params = [':sid' => $serverId];
 
     if ($playerSearch !== '') {
-        $sql .= ' AND pseudo_mc LIKE :player';
-        $params[':player'] = '%' . $playerSearch . '%';
+        $sql .= ' AND pseudo_mc LIKE :player ESCAPE \'!\'';
+        $params[':player'] = Security::likeContains($playerSearch);
     }
 
     $sql .= ' ORDER BY date_connexion DESC LIMIT 100';

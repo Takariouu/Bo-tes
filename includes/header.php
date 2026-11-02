@@ -19,6 +19,12 @@ $csrfToken   = Security::generateCsrfToken();
     <meta name="description" content="Boötes - Panel d'hébergement et d'administration de serveurs Minecraft auto-hébergé">
     <meta name="csrf-token" content="<?= Security::e($csrfToken) ?>">
     <title><?= Security::e($pageTitle) ?></title>
+    <link rel="stylesheet" href="/assets/css/variables.css">
+    <link rel="stylesheet" href="/assets/css/style.css">
+    <link rel="stylesheet" href="/assets/css/layout.css">
+    <link rel="stylesheet" href="/assets/css/components.css">
+    <link rel="stylesheet" href="/assets/css/terminal.css">
+    <script src="/assets/js/script.js" defer></script>
 </head>
 <body class="app">
     <header class="header" role="banner">

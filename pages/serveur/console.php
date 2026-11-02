@@ -16,8 +16,11 @@ $serverId      = isset($activeServerId) && is_int($activeServerId)
     ? $activeServerId
     : Security::validatePositiveInt($_GET['id'] ?? $_POST['server_id'] ?? null);
 $currentUserId = Auth::getUserId();
+$accessLevel   = $serverId !== null && $currentUserId !== null
+    ? Auth::getServerAccessLevel($currentUserId, $serverId, $db)
+    : null;
 
-if ($serverId === null || $currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)) {
+if ($serverId === null || $currentUserId === null || $accessLevel === null) {
     http_response_code(403);
     ?>
     <section class="server-console server-console--forbidden">
@@ -42,6 +45,7 @@ $csrfToken       = Security::generateCsrfToken();
 $feedbackMessage = null;
 $feedbackError   = null;
 $senderPseudo    = (string) ($_SESSION['user']['pseudo'] ?? 'Operateur');
+$canSendCommands = Auth::serverLevelAllows($accessLevel, Auth::SERVER_PERM_CONSOLE);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $postCsrf = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null;
@@ -49,6 +53,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!Security::verifyCsrfToken($postCsrf)) {
         $feedbackError = 'Jeton CSRF invalide. Veuillez réessayer.';
+    } elseif ($action === 'send_command' && !$canSendCommands) {
+        $feedbackError = Auth::serverPermissionError($accessLevel);
     } elseif ($action === 'send_command') {
         $rawCommand = (string) ($_POST['command'] ?? '');
         $res        = $serverManager->sendConsoleCommand($serverId, $rawCommand, $senderPseudo);
@@ -118,14 +124,14 @@ $logLines = $serverManager->readLatestLog($serverId, 120);
                 type="text"
                 id="mc-command-input"
                 name="command"
-                placeholder="<?= $isOnline ? 'say Bonjour depuis le panel Boötes !' : 'Démarrez le serveur pour envoyer des commandes...' ?>"
+                placeholder="<?= !$canSendCommands ? "Votre niveau d'accès ne permet pas d'envoyer de commandes" : ($isOnline ? 'say Bonjour depuis le panel Boötes !' : 'Démarrez le serveur pour envoyer des commandes...') ?>"
                 maxlength="200"
                 required
                 autocomplete="off"
                 class="console-form__input"
-                <?= !$isOnline ? 'disabled' : '' ?>
+                <?= !$isOnline || !$canSendCommands ? 'disabled' : '' ?>
             >
-            <button type="submit" class="console-form__submit" <?= !$isOnline ? 'disabled' : '' ?>>
+            <button type="submit" class="console-form__submit" <?= !$isOnline || !$canSendCommands ? 'disabled' : '' ?>>
                 Exécuter
             </button>
         </div>

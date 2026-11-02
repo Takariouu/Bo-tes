@@ -1,0 +1,21 @@
+# Secrets et configuration locale
+.env
+.env.*
+!.env.example
+
+# Données d'exécution (stockage privé et anciens emplacements dans la racine web)
+/storage/*
+!/storage/.htaccess
+!/storage/.gitignore
+/instances/
+/backups/
+/uploads/
+
+# Journaux, caches et fichiers d'éditeur
+*.log
+*.sqlite
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+vendor/

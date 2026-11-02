@@ -165,8 +165,8 @@ try {
     }
 
     if ($logSearch !== '') {
-        $where[]          = '(l.action LIKE :q_act OR l.details LIKE :q_det OR u.pseudo LIKE :q_usr OR l.adresse_ip LIKE :q_ip)';
-        $like             = '%' . $logSearch . '%';
+        $where[]          = '(l.action LIKE :q_act ESCAPE \'!\' OR l.details LIKE :q_det ESCAPE \'!\' OR u.pseudo LIKE :q_usr ESCAPE \'!\' OR l.adresse_ip LIKE :q_ip ESCAPE \'!\')';
+        $like             = Security::likeContains($logSearch);
         $params[':q_act'] = $like;
         $params[':q_det'] = $like;
         $params[':q_usr'] = $like;
@@ -287,7 +287,7 @@ try {
                                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="revoke_admin">
                                     <input type="hidden" name="admin_user_id" value="<?= $admId ?>">
-                                    <button type="submit" class="admins-table__revoke-btn">
+                                    <button type="submit" class="admins-table__revoke-btn" data-confirm="Révoquer les privilèges administrateur de ce compte ?">
                                         Révoquer les droits Admin
                                     </button>
                                 </form>
@@ -314,7 +314,7 @@ try {
             <form action="/admin/super-admin" method="post" class="super-admin__purge-form">
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="action" value="purge_old_logs_rgpd">
-                <button type="submit" class="super-admin__btn super-admin__btn--purge">
+                <button type="submit" class="super-admin__btn super-admin__btn--purge" data-confirm="Purger définitivement les journaux de plus de 12 mois ?">
                     Purger les logs &gt; 12 mois (Conformité RGPD)
                 </button>
             </form>

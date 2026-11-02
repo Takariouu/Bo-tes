@@ -4,27 +4,28 @@ declare(strict_types=1);
 
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
+use Bootes\Src\Http;
+use Bootes\Src\RateLimiter;
 use Bootes\Src\Security;
 
 $db = $db ?? Database::getInstance();
+
+// Anti brute-force : 5 échecs par compte et par adresse IP, 20 par adresse IP, sur 15 minutes.
+$loginMaxPerAccount = 5;
+$loginMaxPerIp      = 20;
+$loginLockSeconds   = 900;
+$registerMaxPerIp   = 5;
+$registerWindow     = 3600;
 
 $mode = Security::validateString($_GET['mode'] ?? 'login', 1, 15) ?? 'login';
 if (!in_array($mode, ['login', 'register'], true)) {
     $mode = 'login';
 }
 
-$errors = [];
+$errors         = [];
 $successMessage = null;
-$redirectUrl = null;
-
-if (($_GET['action'] ?? '') === 'logout' && isset($_GET['csrf_token'])) {
-    if (Security::verifyCsrfToken((string) $_GET['csrf_token'])) {
-        Auth::logout();
-        $successMessage = 'Vous avez été déconnecté avec succès.';
-    } else {
-        $errors[] = 'Jeton de sécurité invalide lors de la déconnexion.';
-    }
-}
+$rateLimiter    = RateLimiter::default();
+$clientIp       = (string) ($_SERVER['REMOTE_ADDR'] ?? 'inconnue');
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $submittedToken = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null;
@@ -41,16 +42,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $mode       = 'login';
             $identifier = Security::validateString($_POST['identifier'] ?? '', 3, 120) ?? '';
             $password   = isset($_POST['password']) && is_string($_POST['password']) ? $_POST['password'] : '';
+            $accountKey = 'login:account:' . mb_strtolower($identifier, 'UTF-8') . '|' . $clientIp;
+            $ipKey      = 'login:ip:' . $clientIp;
 
             if ($identifier === '' || $password === '') {
                 $errors[] = 'Veuillez renseigner votre identifiant (pseudo ou e-mail) ainsi que votre mot de passe.';
+            } elseif (
+                $rateLimiter->tooManyAttempts($accountKey, $loginMaxPerAccount) ||
+                $rateLimiter->tooManyAttempts($ipKey, $loginMaxPerIp)
+            ) {
+                $waitMinutes = (int) ceil(max($rateLimiter->availableIn($accountKey), $rateLimiter->availableIn($ipKey)) / 60);
+                $errors[]    = sprintf('Trop de tentatives de connexion. Réessayez dans %d minute(s).', max(1, $waitMinutes));
             } elseif (Auth::login($identifier, $password, $db)) {
-                $redirectUrl = Auth::isAdmin() ? '/admin/dashboard' : '/user/compte';
-                if (!headers_sent()) {
-                    header('Location: ' . $redirectUrl);
-                    exit;
-                }
+                $rateLimiter->clear($accountKey);
+                Http::redirect(Auth::isAdmin() ? '/admin/dashboard' : '/user/compte');
             } else {
+                $rateLimiter->hit($accountKey, $loginLockSeconds);
+                $rateLimiter->hit($ipKey, $loginLockSeconds);
                 $errors[] = 'Identifiants incorrects ou compte suspendu par la modération.';
             }
         } elseif ($action === 'register') {
@@ -69,7 +77,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = 'Veuillez saisir une adresse e-mail valide.';
             }
 
-            if (mb_strlen($password, 'UTF-8') < 10) {
+            if (Auth::isReservedIdentity($pseudo, $email)) {
+                $errors[] = 'Ce pseudo ou cette adresse e-mail est réservé(e) par la plateforme.';
+            }
+
+            if (!Auth::isAcceptablePassword($password)) {
                 $errors[] = 'Le mot de passe doit comporter au moins 10 caractères.';
             }
 
@@ -81,15 +93,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = 'Vous devez accepter les Conditions Générales d\'Utilisation et la politique RGPD pour créer un compte.';
             }
 
+            $registerKey = 'register:ip:' . $clientIp;
+            if (empty($errors) && $rateLimiter->tooManyAttempts($registerKey, $registerMaxPerIp)) {
+                $errors[] = 'Trop de créations de compte depuis cette adresse. Réessayez plus tard.';
+            }
+
             if (empty($errors)) {
                 try {
                     if (Auth::register($pseudo, $email, $password, $db)) {
+                        $rateLimiter->hit($registerKey, $registerWindow);
                         Auth::login($email, $password, $db);
-                        $redirectUrl = Auth::isAdmin() ? '/admin/dashboard' : '/user/compte';
-                        if (!headers_sent()) {
-                            header('Location: ' . $redirectUrl);
-                            exit;
-                        }
+                        Http::redirect('/user/compte', 'Bienvenue sur Boötes ! Votre compte a été créé.');
                     } else {
                         $errors[] = 'Ce pseudo ou cette adresse e-mail est déjà utilisé sur Boötes.';
                     }
@@ -111,15 +125,6 @@ $csrfToken = Security::generateCsrfToken();
             <p class="auth__subtitle">Accédez à vos serveurs Minecraft ou rejoignez l'infrastructure.</p>
         </header>
 
-        <?php if ($redirectUrl !== null): ?>
-            <div class="auth__alert auth__alert--success" role="status">
-                <p class="auth__alert-text">
-                    Authentification réussie. Redirection vers votre espace...
-                    <a href="<?= Security::e($redirectUrl) ?>" class="auth__alert-link">Cliquez ici si la redirection n'est pas automatique</a>.
-                </p>
-            </div>
-        <?php endif; ?>
-
         <?php if ($successMessage !== null): ?>
             <div class="auth__alert auth__alert--success" role="status">
                 <p class="auth__alert-text"><?= Security::e($successMessage) ?></p>
@@ -137,7 +142,7 @@ $csrfToken = Security::generateCsrfToken();
             </div>
         <?php endif; ?>
 
-        <?php if (Auth::isLogged() && $redirectUrl === null): ?>
+        <?php if (Auth::isLogged()): ?>
             <?php $targetDashboard = Auth::isAdmin() ? '/admin/dashboard' : '/user/compte'; ?>
             <article class="auth__card auth__card--logged">
                 <h2 class="auth__card-title">Vous êtes déjà connecté</h2>

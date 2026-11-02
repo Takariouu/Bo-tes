@@ -6,16 +6,19 @@ require_once __DIR__ . '/../../src/ResourceManager.php';
 
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
+use Bootes\Src\Http;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
+use Bootes\Src\ServerManager;
+use Bootes\Src\UserManager;
 
 $db              = $db ?? Database::getInstance();
 $resourceManager = new ResourceManager($db);
+$serverManager   = new ServerManager($db);
 
 $loggedUserId = Auth::getUserId();
 if ($loggedUserId === null) {
-    header('Location: /auth?mode=login');
-    exit;
+    Http::redirect('/auth?mode=login');
 }
 
 // Détection du mode modération Admin (?id=X)
@@ -24,7 +27,10 @@ $isAdminView     = false;
 $targetUserId    = $loggedUserId;
 
 if ($requestedUserId !== null && $requestedUserId !== $loggedUserId) {
-    if (Auth::isAdmin()) {
+    // Un administrateur ne gère que des comptes de rang strictement inférieur au sien (anti-escalade).
+    $targetRole = Auth::isAdmin() ? Auth::getUserRole($requestedUserId, $db) : null;
+
+    if ($targetRole !== null && Auth::canAdministrate(Auth::getRole(), $targetRole)) {
         $targetUserId = $requestedUserId;
         $isAdminView  = true;
     } else {
@@ -32,7 +38,7 @@ if ($requestedUserId !== null && $requestedUserId !== $loggedUserId) {
         ?>
         <section class="account account--forbidden">
             <h1 class="account__title">Accès refusé</h1>
-            <p class="account__message">Vous n'avez pas l'autorisation de consulter ou modifier le profil d'un autre utilisateur.</p>
+            <p class="account__message">Vous n'avez pas l'autorisation de consulter ou modifier ce profil (compte inexistant ou de rang égal ou supérieur au vôtre).</p>
             <a href="/user/compte" class="account__btn">Retourner sur mon profil</a>
         </section>
         <?php
@@ -65,6 +71,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         break;
                     }
 
+                    $currentIdentity = $db->prepare('SELECT pseudo, email FROM UTILISATEUR WHERE id_utilisateur = :uid');
+                    $currentIdentity->execute([':uid' => $targetUserId]);
+                    $identityRow    = $currentIdentity->fetch(PDO::FETCH_ASSOC) ?: ['pseudo' => '', 'email' => ''];
+                    $pseudoChanged  = mb_strtolower($newPseudo, 'UTF-8') !== mb_strtolower((string) $identityRow['pseudo'], 'UTF-8');
+                    $emailChanged   = mb_strtolower($newEmail, 'UTF-8') !== mb_strtolower((string) $identityRow['email'], 'UTF-8');
+
+                    if (
+                        ($pseudoChanged && Auth::isReservedIdentity($newPseudo, '')) ||
+                        ($emailChanged && Auth::isReservedIdentity('', $newEmail))
+                    ) {
+                        $feedbackError = 'Ce pseudonyme ou cette adresse e-mail est réservé(e) par la plateforme.';
+                        break;
+                    }
+
                     $dupStmt = $db->prepare('
                         SELECT COUNT(*)
                         FROM UTILISATEUR
@@ -82,27 +102,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         break;
                     }
 
-                    if (!$isAdminView) {
-                        $pwdCheckStmt = $db->prepare('SELECT mot_de_passe FROM UTILISATEUR WHERE id_utilisateur = :uid');
-                        $pwdCheckStmt->execute([':uid' => $targetUserId]);
-                        $storedHash = (string) $pwdCheckStmt->fetchColumn();
-
-                        if (!password_verify($currentPassword, $storedHash)) {
-                            $feedbackError = 'Votre mot de passe actuel est requis et doit être exact pour modifier le profil.';
-                            break;
-                        }
+                    if (!$isAdminView && !Auth::verifyPassword($targetUserId, $currentPassword, $db)) {
+                        $feedbackError = 'Votre mot de passe actuel est requis et doit être exact pour modifier le profil.';
+                        break;
                     }
 
                     if ($newPassword !== '') {
-                        if (mb_strlen($newPassword, 'UTF-8') < 10) {
+                        if (!Auth::isAcceptablePassword($newPassword)) {
                             $feedbackError = 'Le nouveau mot de passe doit contenir au moins 10 caractères.';
                             break;
                         }
-                        $newHash = password_hash($newPassword, PASSWORD_ARGON2ID, [
-                            'memory_cost' => 65536,
-                            'time_cost'   => 4,
-                            'threads'     => 2,
-                        ]);
+                        $newHash = Auth::hashPassword($newPassword);
                         $updStmt = $db->prepare('
                             UPDATE UTILISATEUR
                             SET pseudo = :pseudo, email = :email, mot_de_passe = :hash
@@ -130,6 +140,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if (!$isAdminView && isset($_SESSION['user'])) {
                         $_SESSION['user']['pseudo'] = $newPseudo;
                         $_SESSION['user']['email']  = $newEmail;
+                        if ($newPassword !== '') {
+                            session_regenerate_id(true);
+                        }
                     }
 
                     $feedbackMessage = 'Les informations du profil ont été mises à jour.';
@@ -173,119 +186,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         break;
                     }
 
-                    $db->beginTransaction();
-
-                    if ($rgpdMode === 'delete_all') {
-                        $resourceManager->deleteUserResources($targetUserId);
-                    } else {
-                        // Recherche ou création d'un compte anonyme système pour conserver l'intégrité des ressources
-                        $anonStmt = $db->query("SELECT id_utilisateur FROM UTILISATEUR WHERE pseudo = 'Anonyme_RGPD' LIMIT 1");
-                        $anonId   = $anonStmt ? $anonStmt->fetchColumn() : false;
-
-                        if ($anonId === false) {
-                            $createAnon = $db->prepare("
-                                INSERT INTO UTILISATEUR (pseudo, email, mot_de_passe, role, type_compte, max_ram_allouable, date_inscription)
-                                VALUES ('Anonyme_RGPD', 'anonyme-rgpd@bootes.local', :hash, 'UTILISATEUR', 'STANDARD', 0, NOW())
-                            ");
-                            $createAnon->execute([':hash' => password_hash(bin2hex(random_bytes(16)), PASSWORD_ARGON2ID)]);
-                            $anonId = (int) $db->lastInsertId();
-                        }
-
-                        $resourceManager->anonymizeUserResources($targetUserId, (int) $anonId);
-                    }
-
-                    $db->prepare('DELETE FROM RELATION_UTILISATEUR WHERE id_demandeur = :u1 OR id_destinataire = :u2')
-                       ->execute([':u1' => $targetUserId, ':u2' => $targetUserId]);
-
-                    $db->prepare('DELETE FROM ADMINISTRER_SERVEUR WHERE id_utilisateur = :uid')
-                       ->execute([':uid' => $targetUserId]);
-
-                    $db->prepare('DELETE FROM SERVEUR WHERE id_proprietaire = :uid')
-                       ->execute([':uid' => $targetUserId]);
-
-                    $db->prepare('DELETE FROM UTILISATEUR WHERE id_utilisateur = :uid')
-                       ->execute([':uid' => $targetUserId]);
-
-                    $db->commit();
-
-                    if (!$isAdminView) {
-                        Auth::logout();
-                        header('Location: /home');
-                        exit;
-                    }
-
-                    $feedbackMessage = 'Le compte utilisateur et ses données personnelles ont été purgés conformément au RGPD.';
-                    break;
-
-                case 'create_server':
-                    $serverName = Security::validateString($_POST['nom_serveur'] ?? '', 3, 50);
-                    $mcVersion  = Security::validateString($_POST['version_mc'] ?? '1.21.4', 3, 20) ?? '1.21.4';
-                    $gameMode   = Security::validateString($_POST['mode_jeu'] ?? 'SURVIE', 3, 30) ?? 'SURVIE';
-                    $slotsMax   = Security::validatePositiveInt($_POST['slots_max'] ?? 20) ?? 20;
-                    $isPublic   = isset($_POST['est_public']) && $_POST['est_public'] === '1' ? 1 : 0;
-                    $descSrv    = Security::validateString($_POST['description'] ?? '', 0, 500) ?? '';
-
-                    // Vérification du profil de compte pour le plafond RAM (2 Go Standard vs 6 Go Premium)
-                    $userTierStmt = $db->prepare('SELECT type_compte, max_ram_allouable FROM UTILISATEUR WHERE id_utilisateur = :uid');
-                    $userTierStmt->execute([':uid' => $targetUserId]);
-                    $tierRow    = $userTierStmt->fetch(PDO::FETCH_ASSOC);
-                    $isPremium  = strtoupper((string) ($tierRow['type_compte'] ?? 'STANDARD')) === Auth::ACCOUNT_PREMIUM;
-                    $ramAlloc   = Security::validateRamAllocation($_POST['ram_allouee'] ?? 2048, $isPremium);
-
-                    if ($serverName === null || $ramAlloc === null) {
-                        $feedbackError = 'Nom de serveur invalide ou allocation RAM hors des limites autorisées pour votre offre.';
+                    // Ré-authentification obligatoire du titulaire avant une suppression irréversible.
+                    if (!$isAdminView && !Auth::verifyPassword($targetUserId, (string) ($_POST['current_password'] ?? ''), $db)) {
+                        $feedbackError = 'Votre mot de passe actuel est requis pour confirmer la suppression du compte.';
                         break;
                     }
 
-                    // Attribution dynamique d'un port libre entre 25565 et 26500
-                    $portStmt = $db->query('SELECT COALESCE(MAX(port), 25564) + 1 FROM SERVEUR');
-                    $nextPort = Security::validatePort($portStmt ? $portStmt->fetchColumn() : 25565) ?? 25565;
+                    $userManager = new UserManager($db, $serverManager, $resourceManager);
+                    if (!$userManager->deleteAccount($targetUserId, $rgpdMode === 'delete_all')) {
+                        $feedbackError = 'La suppression du compte a échoué : aucune donnée n\'a été modifiée. Contactez le support.';
+                        break;
+                    }
 
-                    $insSrv = $db->prepare('
-                        INSERT INTO SERVEUR (
-                            id_proprietaire,
-                            nom_serveur,
-                            adresse_ip,
-                            port,
-                            version_mc,
-                            mode_jeu,
-                            statut,
-                            joueurs_connectes,
-                            slots_max,
-                            ram_allouee,
-                            description,
-                            est_public,
-                            date_creation
-                        ) VALUES (
-                            :owner,
-                            :nom,
-                            :ip,
-                            :port,
-                            :version,
-                            :mode,
-                            \'HORS_LIGNE\',
-                            0,
-                            :slots,
-                            :ram,
-                            :desc,
-                            :public,
-                            NOW()
-                        )
-                    ');
-                    $insSrv->execute([
-                        ':owner'   => $targetUserId,
-                        ':nom'     => $serverName,
-                        ':ip'      => 'play.bootes.local',
-                        ':port'    => $nextPort,
-                        ':version' => $mcVersion,
-                        ':mode'    => $gameMode,
-                        ':slots'   => min(100, max(2, $slotsMax)),
-                        ':ram'     => $ramAlloc,
-                        ':desc'    => $descSrv,
-                        ':public'  => $isPublic,
-                    ]);
+                    if (!$isAdminView) {
+                        Auth::logout();
+                        Http::redirect('/home', 'Votre compte et vos données personnelles ont été supprimés définitivement.');
+                    }
 
-                    $feedbackMessage = sprintf('Serveur "%s" créé avec succès sur le port %d.', $serverName, $nextPort);
+                    Http::redirect('/admin/utilisateurs', 'Le compte utilisateur et ses données personnelles ont été purgés conformément au RGPD.');
+
+                case 'create_server':
+                    $creation = $serverManager->createServer($targetUserId, $_POST, $isAdminView && Auth::isAdmin());
+                    if ($creation['success']) {
+                        $feedbackMessage = $creation['message'];
+                    } else {
+                        $feedbackError = $creation['message'];
+                    }
                     break;
 
                 case 'add_friend':
@@ -609,6 +535,8 @@ try {
 
 $formTargetUrl = $isAdminView ? '/user/compte?id=' . $targetUserId : '/user/compte';
 $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCOUNT_PREMIUM;
+$ramCeiling    = ServerManager::ramCeilingFor((string) $userProfile['type_compte'], (int) $userProfile['max_ram_allouable']);
+$maxServers    = ServerManager::maxServersFor((string) $userProfile['type_compte']);
 ?>
 <div class="account">
     <header class="account__header">
@@ -829,7 +757,21 @@ $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCO
                         >
                     </div>
 
-                    <button type="submit" class="account-form__submit account-form__submit--danger">
+                    <?php if (!$isAdminView): ?>
+                        <div class="account-form__field">
+                            <label for="confirm-delete-password" class="account-form__label">Mot de passe actuel</label>
+                            <input
+                                type="password"
+                                id="confirm-delete-password"
+                                name="current_password"
+                                required
+                                autocomplete="current-password"
+                                class="account-form__input"
+                            >
+                        </div>
+                    <?php endif; ?>
+
+                    <button type="submit" class="account-form__submit account-form__submit--danger" data-confirm="Supprimer définitivement ce compte et toutes ses données ? Cette action est irréversible.">
                         Supprimer définitivement le compte
                     </button>
                 </form>
@@ -870,26 +812,24 @@ $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCO
                 <div class="account-form__field">
                     <label for="srv-mode" class="account-form__label">Mode de jeu</label>
                     <select id="srv-mode" name="mode_jeu" class="account-form__select">
-                        <option value="SURVIE">Survie (Survival)</option>
-                        <option value="CREATIF">Créatif (Creative)</option>
-                        <option value="HARDCORE">Hardcore</option>
-                        <option value="AVENTURE">Aventure / Mini-jeux</option>
-                        <option value="MODDE">Survie Moddée</option>
+                        <?php foreach (ServerManager::GAME_MODES as $modeKey => $modeLabel): ?>
+                            <option value="<?= Security::e($modeKey) ?>"><?= Security::e($modeLabel) ?></option>
+                        <?php endforeach; ?>
                     </select>
                 </div>
 
                 <div class="account-form__field">
                     <label for="srv-ram" class="account-form__label">
-                        Mémoire RAM allouée (Plafond de votre offre : <?= (int) $userProfile['max_ram_allouable'] ?> Mo)
+                        Mémoire RAM allouée (Plafond de votre offre : <?= $ramCeiling ?> Mo par serveur et au total en ligne)
                     </label>
                     <input
                         type="number"
                         id="srv-ram"
                         name="ram_allouee"
                         min="512"
-                        max="<?= $isPremiumTier ? 6144 : 2048 ?>"
+                        max="<?= $isAdminView ? ServerManager::HOST_MAX_MC_RAM_MB : max(512, $ramCeiling) ?>"
                         step="512"
-                        value="2048"
+                        value="<?= min(2048, max(512, $ramCeiling)) ?>"
                         required
                         class="account-form__input"
                     >
@@ -897,8 +837,12 @@ $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCO
 
                 <div class="account-form__field">
                     <label for="srv-slots" class="account-form__label">Nombre de slots (joueurs max)</label>
-                    <input type="number" id="srv-slots" name="slots_max" min="2" max="100" value="20" required class="account-form__input">
+                    <input type="number" id="srv-slots" name="slots_max" min="2" max="<?= ServerManager::MAX_SLOTS ?>" value="20" required class="account-form__input">
                 </div>
+
+                <p class="account-form__help">
+                    Offre <?= Security::e((string) $userProfile['type_compte']) ?> : <?= $maxServers ?> serveur(s) maximum.
+                </p>
 
                 <div class="account-form__field">
                     <label for="srv-desc" class="account-form__label">Description publique</label>
