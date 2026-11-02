@@ -1,29 +1,33 @@
 Options -Indexes -MultiViews
 ServerSignature Off
+DirectoryIndex index.php
 
 <IfModule mod_headers.c>
     Header always set X-Content-Type-Options "nosniff"
     Header always set X-Frame-Options "SAMEORIGIN"
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
-    Header always set X-XSS-Protection "1; mode=block"
+    Header always unset X-Powered-By
 </IfModule>
 
-<IfModule mod_rewrite.c>
-    RewriteEngine On
-    RewriteBase /
+# mod_rewrite est obligatoire : sans lui, Apache renvoie une erreur au lieu d'exposer les fichiers internes.
+RewriteEngine On
+RewriteBase /
 
-    # Blocage de l'accès aux fichiers cachés (.git, .env, .htaccess)
-    RewriteRule (?:^|/)\. - [F,L]
+# 1. Fichiers et dossiers cachés (.git, .env, .htaccess...)
+RewriteRule (?:^|/)\. - [F,L]
 
-    # Interdiction formelle d'accéder directement aux dossiers internes et sensibles
-    RewriteRule ^(config|src|includes|pages|backups)(/.*)?$ - [F,L,NC]
+# 2. Seules les ressources statiques de /assets sont servies directement
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^assets/.+\.(?:css|js|png|jpe?g|gif|svg|webp|ico|woff2?)$ - [L,NC]
 
-    # Autoriser l'accès direct aux ressources statiques existantes (assets, images, scripts)
-    RewriteCond %{REQUEST_FILENAME} -f
-    RewriteRule ^assets/ - [L]
+# 3. Contrôleur frontal (cible des réécritures ci-dessous)
+RewriteRule ^index\.php$ - [L]
 
-    # Redirection de toutes les requêtes vers le contrôleur frontal unique
-    RewriteCond %{REQUEST_FILENAME} !-f
-    RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteRule ^(.*)$ index.php?page=$1 [QSA,L]
-</IfModule>
+# 4. Liste blanche : tout autre fichier ou dossier existant est interdit
+#    (config, src, includes, pages, storage, tests, README...)
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^.+$ - [F,L]
+
+# 5. Routage de toutes les autres URL vers le contrôleur frontal
+RewriteRule ^(.*)$ index.php?page=$1 [QSA,L]

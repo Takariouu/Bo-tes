@@ -2,19 +2,37 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/config/constants.php';
 require_once __DIR__ . '/config/database.php';
-require_once __DIR__ . '/src/Security.php';
-require_once __DIR__ . '/src/Auth.php';
 
+spl_autoload_register(static function (string $class): void {
+    $prefix = 'Bootes\\Src\\';
+    if (str_starts_with($class, $prefix)) {
+        $file = __DIR__ . '/src/' . substr($class, strlen($prefix)) . '.php';
+        if (is_file($file)) {
+            require_once $file;
+        }
+    }
+});
+
+use Bootes\Config\AppConfig;
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
+use Bootes\Src\Http;
 use Bootes\Src\Security;
 
+AppConfig::load();
+if (AppConfig::isProduction()) {
+    ini_set('display_errors', '0');
+}
+ini_set('log_errors', '1');
+
+Http::sendSecurityHeaders();
 Auth::initSession();
 
 /**
  * Définition de la table de routage et des politiques de contrôle d'accès (RBAC).
- *Basé sur l'arborescence des vues dans /pages/.
+ * Basé sur l'arborescence des vues dans /pages/.
  */
 $routes = [
     // Routes publiques
@@ -22,6 +40,7 @@ $routes = [
     'auth'                      => ['file' => '/pages/public/auth.php',                  'access' => 'PUBLIC',      'title' => 'Authentification — Boötes'],
     'catalogue'                 => ['file' => '/pages/public/catalogue.php',             'access' => 'PUBLIC',      'title' => 'Catalogue — Boötes'],
     'cgu'                       => ['file' => '/pages/public/cgu.php',                   'access' => 'PUBLIC',      'title' => 'Conditions Générales — Boötes'],
+    'offres'                    => ['file' => '/pages/public/offres.php',                'access' => 'PUBLIC',      'title' => 'Offres d\'hébergement — Boötes'],
     'ressource-detail'          => ['file' => '/pages/public/ressource-detail.php',      'access' => 'PUBLIC',      'title' => 'Détail de la ressource — Boötes'],
     'serveur-public'            => ['file' => '/pages/public/serveur-public.php',        'access' => 'PUBLIC',      'title' => 'Serveurs Publics — Boötes'],
 
@@ -49,10 +68,15 @@ $routes = [
 ];
 
 /**
- * Rendu sémantique des pages d'erreur HTTP (403, 404, 500).
+ * Rendu sémantique des pages d'erreur HTTP (403, 404, 500, 503).
+ * Toute sortie partielle de la page en cours est abandonnée.
  */
-function renderHttpError(int $statusCode, string $heading, string $message, string $currentRoute): void
+function renderHttpError(int $statusCode, string $heading, string $message, string $currentRoute): never
 {
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+
     http_response_code($statusCode);
     $pageTitle = sprintf('Erreur %d — Boötes', $statusCode);
 
@@ -81,6 +105,47 @@ function renderHttpError(int $statusCode, string $heading, string $message, stri
     exit;
 }
 
+// Erreurs non gérées : journalisation complète côté serveur, page générique côté client (aucune trace).
+set_exception_handler(static function (Throwable $e): void {
+    error_log(sprintf(
+        "[Boötes][Exception] %s: %s in %s:%d\n%s",
+        $e::class,
+        $e->getMessage(),
+        $e->getFile(),
+        $e->getLine(),
+        $e->getTraceAsString()
+    ));
+
+    try {
+        renderHttpError(500, 'Erreur interne', 'Une erreur inattendue est survenue. L\'incident a été journalisé, veuillez réessayer plus tard.', 'home');
+    } catch (Throwable) {
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+        if (!headers_sent()) {
+            http_response_code(500);
+        }
+        echo 'Erreur interne du serveur.';
+    }
+});
+
+register_shutdown_function(static function (): void {
+    $error = error_get_last();
+    if ($error === null || !in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+        return;
+    }
+
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    if (!headers_sent()) {
+        http_response_code(500);
+        header('Content-Type: text/html; charset=UTF-8');
+    }
+    echo '<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Erreur 500 — Boötes</title></head>'
+        . '<body><h1>Erreur interne</h1><p>Le service est momentanément indisponible.</p></body></html>';
+});
+
 // 1. Récupération et nettoyage de la route demandée
 $rawPage      = isset($_GET['page']) && is_string($_GET['page']) ? $_GET['page'] : 'home';
 $currentRoute = Security::sanitizeRoute($rawPage);
@@ -100,25 +165,32 @@ if ($currentRoute === '404' || !isset($routes[$currentRoute])) {
     );
 }
 
-$routeConfig    = $routes[$currentRoute];
-$requiredAccess = $routeConfig['access'];
-$pageTitle      = $routeConfig['title'];
-$targetFile     = __DIR__ . $routeConfig['file'];
-$activeServerId = null;
+$routeConfig       = $routes[$currentRoute];
+$requiredAccess    = $routeConfig['access'];
+$pageTitle         = $routeConfig['title'];
+$targetFile        = __DIR__ . $routeConfig['file'];
+$activeServerId    = null;
+$serverAccessLevel = null;
 
 // 3. Connexion à la base de données MariaDB
 try {
     $db = Database::getInstance();
 } catch (RuntimeException $e) {
     renderHttpError(
-        500,
+        503,
         'Service temporairement indisponible',
         'Impossible d\'établir la liaison avec la base de données HEBERGEUR_MC.',
         $currentRoute
     );
 }
 
-// 4. Contrôle strict des permissions via Auth selon le niveau requis par la route
+// 4. Resynchronisation de la session avec la base (bannissement, suppression, changement de rôle)
+Auth::refreshSession($db);
+if (Auth::isLogged()) {
+    Http::sendNoStore();
+}
+
+// 5. Contrôle strict des permissions via Auth selon le niveau requis par la route
 switch ($requiredAccess) {
     case 'PUBLIC':
         break;
@@ -156,7 +228,8 @@ switch ($requiredAccess) {
             );
         }
 
-        if (!Auth::canManageServer($currentUserId, $activeServerId, $db)) {
+        $serverAccessLevel = Auth::getServerAccessLevel($currentUserId, $activeServerId, $db);
+        if ($serverAccessLevel === null) {
             renderHttpError(
                 403,
                 'Accès refusé au serveur',
@@ -189,7 +262,7 @@ switch ($requiredAccess) {
         break;
 }
 
-// 5. Vérification physique du fichier de vue avant inclusion
+// 6. Vérification physique du fichier de vue avant inclusion
 if (!is_file($targetFile) || !is_readable($targetFile)) {
     renderHttpError(
         404,
@@ -199,12 +272,24 @@ if (!is_file($targetFile) || !is_readable($targetFile)) {
     );
 }
 
-// 6. Assemblage de la réponse HTML5 sémantique
+// 7. Exécution de la vue AVANT tout envoi de HTML : les traitements POST peuvent ainsi rediriger,
+//    régénérer la session ou transmettre un fichier, et l'en-tête reflète l'état à jour.
+ob_start();
+require $targetFile;
+$pageContent  = (string) ob_get_clean();
+$flashMessage = Http::consumeFlash();
+
+// 8. Assemblage de la réponse HTML5 sémantique
 require __DIR__ . '/includes/header.php';
 require __DIR__ . '/includes/sidebar.php';
 ?>
 <main class="main" role="main">
-    <?php require $targetFile; ?>
+    <?php if ($flashMessage !== null): ?>
+        <div class="alert alert--success" role="status">
+            <p><?= Security::e($flashMessage) ?></p>
+        </div>
+    <?php endif; ?>
+    <?= $pageContent ?>
 </main>
 <?php
 require __DIR__ . '/includes/footer.php';

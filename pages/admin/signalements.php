@@ -60,21 +60,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $upd->execute([':rid' => $reportId]);
                     $feedbackMessage = sprintf('Signalement #%d classé sans suite (Ignoré).', $reportId);
                 } elseif ($action === 'delete_reported_content') {
+                    $removed = true;
                     if ($targetType === 'RESSOURCE') {
-                        $resourceManager->deleteResource($targetId);
+                        $removed = $resourceManager->deleteResource($targetId);
                         $feedbackMessage = sprintf('La ressource signalée #%d a été supprimée et le signalement #%d a été résolu.', $targetId, $reportId);
                     } elseif ($targetType === 'SERVEUR') {
                         $serverManager->forceKillServer($targetId, $currentUserId);
-                        $db->prepare('DELETE FROM ADMINISTRER_SERVEUR WHERE id_serveur = :sid')->execute([':sid' => $targetId]);
-                        $db->prepare('DELETE FROM ETRE_LISTER WHERE id_serveur = :sid')->execute([':sid' => $targetId]);
-                        $db->prepare('DELETE FROM SERVEUR WHERE id_serveur = :sid')->execute([':sid' => $targetId]);
-                        $feedbackMessage = sprintf('Le serveur signalé #%d a été arrêté et supprimé.', $targetId);
+                        $removed = $serverManager->deleteServer($targetId);
+                        $feedbackMessage = sprintf('Le serveur signalé #%d a été arrêté et supprimé avec ses données.', $targetId);
                     } else {
                         $feedbackMessage = sprintf('Contenu cible #%d retiré.', $targetId);
                     }
 
-                    $db->prepare("UPDATE SIGNALEMENT SET statut = 'TRAITE' WHERE id_signalement = :rid")
-                       ->execute([':rid' => $reportId]);
+                    if ($removed) {
+                        $db->prepare("UPDATE SIGNALEMENT SET statut = 'TRAITE' WHERE id_signalement = :rid")
+                           ->execute([':rid' => $reportId]);
+                    } else {
+                        $feedbackMessage = null;
+                        $feedbackError   = sprintf('La suppression du contenu #%d a échoué : le signalement reste ouvert.', $targetId);
+                    }
                 } elseif ($action === 'ban_reported_user') {
                     $offenderId = null;
 
@@ -96,8 +100,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         }
                     }
 
-                    if ($offenderId === null || $offenderId === $currentUserId) {
+                    $offenderRole = $offenderId !== null ? Auth::getUserRole($offenderId, $db) : null;
+
+                    if ($offenderId === null || $offenderId === $currentUserId || $offenderRole === null) {
                         $feedbackError = 'Impossible d\'identifier ou de bannir le propriétaire de ce contenu.';
+                    } elseif (!Auth::canAdministrate(Auth::getRole(), $offenderRole)) {
+                        $feedbackError = 'Ce compte est de rang égal ou supérieur au vôtre : le bannissement doit être décidé par un Super-Administrateur.';
                     } else {
                         $db->prepare('UPDATE UTILISATEUR SET est_banni = 1 WHERE id_utilisateur = :uid')
                            ->execute([':uid' => $offenderId]);
@@ -323,7 +331,7 @@ try {
                                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                     <input type="hidden" name="report_id" value="<?= $repId ?>">
                                     <input type="hidden" name="action" value="delete_reported_content">
-                                    <button type="submit" class="moderation-card__btn moderation-card__btn--delete">
+                                    <button type="submit" class="moderation-card__btn moderation-card__btn--delete" data-confirm="Supprimer définitivement le contenu signalé ?">
                                         Supprimer le contenu signalé
                                     </button>
                                 </form>
@@ -332,7 +340,7 @@ try {
                                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                     <input type="hidden" name="report_id" value="<?= $repId ?>">
                                     <input type="hidden" name="action" value="ban_reported_user">
-                                    <button type="submit" class="moderation-card__btn moderation-card__btn--ban">
+                                    <button type="submit" class="moderation-card__btn moderation-card__btn--ban" data-confirm="Bannir le responsable, arrêter ses serveurs et suspendre ses ressources ?">
                                         Bannir l'utilisateur responsable
                                     </button>
                                 </form>

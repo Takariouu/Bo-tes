@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../src/ResourceManager.php';
 
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
+use Bootes\Src\Http;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
 
@@ -14,8 +15,7 @@ $resourceManager = new ResourceManager($db);
 
 $currentUserId = Auth::getUserId();
 if ($currentUserId === null) {
-    header('Location: /auth?mode=login');
-    exit;
+    Http::redirect('/auth?mode=login');
 }
 
 $resourceId = Security::validatePositiveInt($_GET['id'] ?? $_POST['resource_id'] ?? null);
@@ -37,9 +37,6 @@ if ($isEditMode && !$resourceManager->canManageResource($currentUserId, $resourc
 $csrfToken       = Security::generateCsrfToken();
 $feedbackMessage = null;
 $feedbackError   = null;
-
-$allowedExtensions = ['jar', 'zip', 'mrpack'];
-$maxUploadSize     = 104857600; // 100 Mo max
 
 // Traitement des formulaires POST (Création, Mise à jour, Ajout de version, Suppression de version, Suppression ressource)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -88,50 +85,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 if ($versionNumber === null || empty($mcVersions)) {
                     $feedbackError = 'Veuillez indiquer un numéro de version (ex: 1.0.0) et cocher au moins une version de Minecraft.';
-                } elseif (!isset($_FILES['archive_file']) || !is_array($_FILES['archive_file']) || (int) $_FILES['archive_file']['error'] !== UPLOAD_ERR_OK) {
-                    $feedbackError = 'Veuillez sélectionner un fichier (.jar, .zip ou .mrpack) valide à téléverser.';
                 } else {
-                    $originalName = basename((string) $_FILES['archive_file']['name']);
-                    $fileSize     = (int) $_FILES['archive_file']['size'];
-                    $tmpPath      = (string) $_FILES['archive_file']['tmp_name'];
-                    $extension    = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+                    $stored = $resourceManager->storeUploadedArchive($_FILES['archive_file'] ?? null, $resourceId);
 
-                    if (!in_array($extension, $allowedExtensions, true)) {
-                        $feedbackError = 'Extension non autorisée. Seuls les fichiers .jar, .zip et .mrpack sont acceptés.';
-                    } elseif ($fileSize <= 0 || $fileSize > $maxUploadSize) {
-                        $feedbackError = 'La taille du fichier est invalide ou dépasse la limite autorisée de 100 Mo.';
+                    if (!$stored['success']) {
+                        $feedbackError = $stored['message'];
+                    } elseif ($resourceManager->addVersionFile(
+                        $resourceId,
+                        $versionNumber,
+                        $mcVersions,
+                        (string) $stored['original_name'],
+                        (string) $stored['stored_name'],
+                        (int) $stored['size'],
+                        $changelog
+                    )) {
+                        $feedbackMessage = sprintf('La version %s (%s) a été publiée avec succès.', $versionNumber, (string) $stored['original_name']);
                     } else {
-                        $safeFileName = sprintf(
-                            'res-%d-v%s-%s.%s',
-                            $resourceId,
-                            preg_replace('/[^a-zA-Z0-9._-]/', '', $versionNumber),
-                            bin2hex(random_bytes(4)),
-                            $extension
-                        );
-                        $relativeStoragePath = '/uploads/ressources/' . $safeFileName;
-                        $absoluteUploadDir   = dirname(__DIR__, 2) . '/uploads/ressources';
-
-                        if (!is_dir($absoluteUploadDir)) {
-                            @mkdir($absoluteUploadDir, 0750, true);
-                        }
-
-                        if (is_dir($absoluteUploadDir) && is_writable($absoluteUploadDir)) {
-                            @move_uploaded_file($tmpPath, $absoluteUploadDir . '/' . $safeFileName);
-                        }
-
-                        if ($resourceManager->addVersionFile(
-                            $resourceId,
-                            $versionNumber,
-                            $mcVersions,
-                            $originalName,
-                            $relativeStoragePath,
-                            $fileSize,
-                            $changelog
-                        )) {
-                            $feedbackMessage = sprintf('La version %s (%s) a été publiée avec succès.', $versionNumber, $originalName);
-                        } else {
-                            $feedbackError = 'Erreur lors de l\'enregistrement de la version en base de données.';
-                        }
+                        $resourceManager->purgeStoredFiles([(string) $stored['stored_name']]);
+                        $feedbackError = 'Erreur lors de l\'enregistrement de la version : vérifiez les versions de Minecraft cochées.';
                     }
                 }
             } elseif ($action === 'delete_version' && $isEditMode && $resourceId !== null) {
@@ -143,8 +114,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             } elseif ($action === 'delete_resource' && $isEditMode && $resourceId !== null) {
                 if ($resourceManager->deleteResource($resourceId)) {
-                    header('Location: /user/compte');
-                    exit;
+                    Http::redirect('/user/compte#section-creations', 'La ressource et ses fichiers ont été supprimés.');
                 }
                 $feedbackError = 'La suppression de la ressource a échoué.';
             }
@@ -422,7 +392,7 @@ $actionUrl         = $isEditMode && $resourceId !== null
                                             <input type="hidden" name="action" value="delete_version">
                                             <input type="hidden" name="resource_id" value="<?= (int) $resource['id_ressource'] ?>">
                                             <input type="hidden" name="file_id" value="<?= (int) $vf['id_fichier'] ?>">
-                                            <button type="submit" class="versions-admin-table__delete-btn">Supprimer</button>
+                                            <button type="submit" class="versions-admin-table__delete-btn" data-confirm="Supprimer définitivement ce fichier de version ?">Supprimer</button>
                                         </form>
                                     </td>
                                 </tr>
@@ -442,7 +412,7 @@ $actionUrl         = $isEditMode && $resourceId !== null
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="action" value="delete_resource">
                 <input type="hidden" name="resource_id" value="<?= (int) $resource['id_ressource'] ?>">
-                <button type="submit" class="creator-editor__btn creator-editor__btn--danger">
+                <button type="submit" class="creator-editor__btn creator-editor__btn--danger" data-confirm="Supprimer définitivement cette ressource, toutes ses versions et ses avis ?">
                     Supprimer définitivement cette ressource
                 </button>
             </form>

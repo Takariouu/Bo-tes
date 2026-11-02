@@ -16,8 +16,12 @@ $serverId      = isset($activeServerId) && is_int($activeServerId)
     ? $activeServerId
     : Security::validatePositiveInt($_GET['id'] ?? $_POST['server_id'] ?? null);
 $currentUserId = Auth::getUserId();
+$accessLevel   = $serverId !== null && $currentUserId !== null
+    ? Auth::getServerAccessLevel($currentUserId, $serverId, $db)
+    : null;
+$canConfigure  = Auth::serverLevelAllows($accessLevel, Auth::SERVER_PERM_FULL);
 
-if ($serverId === null || $currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)) {
+if ($serverId === null || $currentUserId === null || $accessLevel === null) {
     http_response_code(403);
     ?>
     <section class="server-access server-access--forbidden">
@@ -37,7 +41,7 @@ if ($server === null) {
     return;
 }
 
-$isOwnerOrGlobalAdmin = ((int) $server['id_proprietaire'] === $currentUserId) || Auth::isAdmin();
+$isOwnerOrGlobalAdmin = $accessLevel === Auth::SERVER_PERM_OWNER;
 $csrfToken            = Security::generateCsrfToken();
 $feedbackMessage      = null;
 $feedbackError        = null;
@@ -57,7 +61,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 $targetUid = Security::validatePositiveInt($_POST['friend_user_id'] ?? null);
-                $permLevel = Security::validateString($_POST['niveau_permission'] ?? 'COMPLET', 3, 20) ?? 'COMPLET';
+                $permLevel = Security::validateString($_POST['niveau_permission'] ?? Auth::SERVER_PERM_READ, 3, 20) ?? Auth::SERVER_PERM_READ;
 
                 if ($targetUid === null && !empty($_POST['coadmin_pseudo'])) {
                     $pseudoSearch = Security::validateString($_POST['coadmin_pseudo'], 3, 32);
@@ -97,6 +101,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
 
             case 'add_listed_player':
+                if (!$canConfigure) {
+                    $feedbackError = Auth::serverPermissionError($accessLevel);
+                    break;
+                }
                 $pseudoMc = Security::validateString($_POST['pseudo_mc'] ?? '', 3, 16) ?? '';
                 $listType = Security::validateString($_POST['type_liste'] ?? 'WHITELIST', 2, 15) ?? 'WHITELIST';
                 $raison   = Security::validateString($_POST['raison'] ?? '', 0, 255) ?? '';
@@ -109,6 +117,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
 
             case 'remove_listed_player':
+                if (!$canConfigure) {
+                    $feedbackError = Auth::serverPermissionError($accessLevel);
+                    break;
+                }
                 $pseudoMc = Security::validateString($_POST['pseudo_mc'] ?? '', 3, 16) ?? '';
                 $listType = Security::validateString($_POST['type_liste'] ?? 'WHITELIST', 2, 15) ?? 'WHITELIST';
 
@@ -215,9 +227,9 @@ try {
                     <div class="coadmin-form__field">
                         <label for="coadmin-perm" class="coadmin-form__label">Niveau d'habilitation</label>
                         <select id="coadmin-perm" name="niveau_permission" class="coadmin-form__select">
-                            <option value="COMPLET">Complet (Démarrage, Console, Backups, Joueurs)</option>
-                            <option value="CONSOLE">Opérateur Console &amp; Logs</option>
-                            <option value="LECTURE">Consultation seule</option>
+                            <option value="LECTURE" selected>Consultation seule (dashboard, logs, statistiques)</option>
+                            <option value="CONSOLE">Opérateur (démarrage, arrêt, console)</option>
+                            <option value="COMPLET">Complet (+ configuration, sauvegardes, joueurs, ressources)</option>
                         </select>
                     </div>
 
@@ -253,7 +265,7 @@ try {
                                             <input type="hidden" name="server_id" value="<?= $serverId ?>">
                                             <input type="hidden" name="action" value="remove_coadmin">
                                             <input type="hidden" name="coadmin_user_id" value="<?= (int) $ca['id_utilisateur'] ?>">
-                                            <button type="submit" class="coadmins-table__revoke-btn">Révoquer</button>
+                                            <button type="submit" class="coadmins-table__revoke-btn" data-confirm="Révoquer l'accès de ce co-administrateur ?">Révoquer</button>
                                         </form>
                                     </td>
                                 <?php endif; ?>
@@ -270,6 +282,7 @@ try {
                 Whitelist, Blacklist &amp; Opérateurs Minecraft (<code>ETRE_LISTER</code>)
             </h2>
 
+            <?php if ($canConfigure): ?>
             <form action="/serveur/acces-admin?id=<?= $serverId ?>" method="post" class="playerlist-form">
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
@@ -313,6 +326,11 @@ try {
 
                 <button type="submit" class="playerlist-form__submit">Enregistrer le joueur</button>
             </form>
+            <?php else: ?>
+                <p class="server-access__notice" role="note">
+                    Votre accès (<?= Security::e((string) $accessLevel) ?>) permet de consulter les listes, pas de les modifier.
+                </p>
+            <?php endif; ?>
 
             <?php if (empty($listedPlayers)): ?>
                 <p class="server-access__empty">Aucun joueur inscrit dans la Whitelist ou la Blacklist.</p>
@@ -338,6 +356,7 @@ try {
                                 <td class="playerlist-table__cell"><?= Security::e((string) ($lp['raison'] ?: '—')) ?></td>
                                 <td class="playerlist-table__cell"><?= Security::e((string) $lp['date_ajout']) ?></td>
                                 <td class="playerlist-table__cell">
+                                    <?php if ($canConfigure): ?>
                                     <form action="/serveur/acces-admin?id=<?= $serverId ?>" method="post" class="playerlist-table__form">
                                         <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                         <input type="hidden" name="server_id" value="<?= $serverId ?>">
@@ -346,6 +365,9 @@ try {
                                         <input type="hidden" name="type_liste" value="<?= Security::e((string) $lp['type_liste']) ?>">
                                         <button type="submit" class="playerlist-table__remove-btn">Retirer</button>
                                     </form>
+                                    <?php else: ?>
+                                        —
+                                    <?php endif; ?>
                                 </td>
                             </tr>
                         <?php endforeach; ?>

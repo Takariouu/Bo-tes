@@ -10,7 +10,7 @@ $db = $db ?? Database::getInstance();
 $rawType       = strtolower(Security::validateString($_GET['type'] ?? 'all', 1, 20) ?? 'all');
 $searchQuery   = Security::validateString($_GET['q'] ?? '', 0, 100) ?? '';
 $versionFilter = Security::validateString($_GET['version'] ?? 'all', 1, 20) ?? 'all';
-$currentPage   = Security::validatePositiveInt($_GET['p'] ?? 1) ?? 1;
+$currentPage   = min(1000, Security::validatePositiveInt($_GET['p'] ?? 1) ?? 1);
 $perPage       = 12;
 $offset        = ($currentPage - 1) * $perPage;
 
@@ -38,8 +38,8 @@ try {
         $params       = [];
 
         if ($searchQuery !== '') {
-            $whereClauses[]   = '(s.nom_serveur LIKE :q_nom OR s.description LIKE :q_desc OR s.mode_jeu LIKE :q_mode)';
-            $likeQuery        = '%' . $searchQuery . '%';
+            $whereClauses[]   = '(s.nom_serveur LIKE :q_nom ESCAPE \'!\' OR s.description LIKE :q_desc ESCAPE \'!\' OR s.mode_jeu LIKE :q_mode ESCAPE \'!\')';
+            $likeQuery        = Security::likeContains($searchQuery);
             $params[':q_nom']  = $likeQuery;
             $params[':q_desc'] = $likeQuery;
             $params[':q_mode'] = $likeQuery;
@@ -90,14 +90,15 @@ try {
         $whereClauses = ["r.statut_moderation = 'VALIDE'"];
         $params       = [];
 
-        if (in_array($normalizedType, ['mod', 'plugin', 'modpack'], true)) {
+        $resourceTypeMap = ['mod' => 'MOD', 'plugin' => 'PLUGIN', 'modpack' => 'MOD_PACK'];
+        if (isset($resourceTypeMap[$normalizedType])) {
             $whereClauses[]          = 'UPPER(r.type_ressource) = :type_res';
-            $params[':type_res']     = strtoupper($normalizedType);
+            $params[':type_res']     = $resourceTypeMap[$normalizedType];
         }
 
         if ($searchQuery !== '') {
-            $whereClauses[]    = '(r.nom_ressource LIKE :q_nom OR r.resume LIKE :q_res OR r.description LIKE :q_desc)';
-            $likeQuery         = '%' . $searchQuery . '%';
+            $whereClauses[]    = '(r.nom_ressource LIKE :q_nom ESCAPE \'!\' OR r.resume LIKE :q_res ESCAPE \'!\' OR r.description LIKE :q_desc ESCAPE \'!\')';
+            $likeQuery         = Security::likeContains($searchQuery);
             $params[':q_nom']  = $likeQuery;
             $params[':q_res']  = $likeQuery;
             $params[':q_desc'] = $likeQuery;

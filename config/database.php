@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Bootes\Config;
 
+require_once __DIR__ . '/constants.php';
+
 use PDO;
 use PDOException;
 use RuntimeException;
@@ -31,14 +33,17 @@ final class Database
         throw new RuntimeException('La désérialisation du Singleton Database est interdite.');
     }
 
+    /**
+     * Connexion unique ; identifiants lus dans l'environnement serveur ou le fichier .env (jamais dans le code).
+     */
     public static function getInstance(): PDO
     {
         if (self::$instance === null) {
-            $host = getenv('DB_HOST') ?: self::DEFAULT_HOST;
-            $port = (int) (getenv('DB_PORT') ?: self::DEFAULT_PORT);
-            $db   = getenv('DB_NAME') ?: self::DEFAULT_DB;
-            $user = getenv('DB_USER') ?: self::DEFAULT_USER;
-            $pass = getenv('DB_PASS') !== false ? (string) getenv('DB_PASS') : self::DEFAULT_PASS;
+            $host = AppConfig::env('DB_HOST', self::DEFAULT_HOST);
+            $port = (int) AppConfig::env('DB_PORT', (string) self::DEFAULT_PORT);
+            $db   = AppConfig::env('DB_NAME', self::DEFAULT_DB);
+            $user = AppConfig::env('DB_USER', self::DEFAULT_USER);
+            $pass = AppConfig::env('DB_PASS', self::DEFAULT_PASS);
 
             $dsn = sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $host, $port, $db);
 

@@ -1,0 +1,70 @@
+/* Base : réinitialisation légère et typographie */
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    line-height: 1.5;
+}
+
+a {
+    color: var(--color-primary);
+}
+
+h1,
+h2,
+h3 {
+    line-height: 1.25;
+    margin: 0 0 var(--space-3);
+}
+
+h1 { font-size: 1.6rem; }
+h2 { font-size: 1.25rem; }
+h3 { font-size: 1.05rem; }
+
+p {
+    margin: 0 0 var(--space-3);
+}
+
+code,
+pre {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: var(--space-4);
+    background: var(--color-surface);
+}
+
+caption {
+    text-align: left;
+    color: var(--color-text-muted);
+    padding-bottom: var(--space-2);
+}
+
+th,
+td {
+    padding: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+    text-align: left;
+    vertical-align: top;
+}
+
+ul {
+    padding-left: 1.25rem;
+}
+
+:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+}

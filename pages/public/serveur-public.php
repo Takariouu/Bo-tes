@@ -39,6 +39,48 @@ if ($serverId === null) {
     return;
 }
 
+// Visibilité contrôlée AVANT tout traitement : aucune action possible sur un serveur privé d'un tiers.
+$server = null;
+try {
+    $stmt = $db->prepare('
+        SELECT 
+            s.id_serveur,
+            s.id_proprietaire,
+            s.nom_serveur,
+            s.adresse_ip,
+            s.port,
+            s.version_mc,
+            s.mode_jeu,
+            s.statut,
+            s.joueurs_connectes,
+            s.slots_max,
+            s.ram_allouee,
+            s.description,
+            s.est_public,
+            s.date_creation,
+            u.pseudo AS proprietaire_pseudo
+        FROM SERVEUR s
+        INNER JOIN UTILISATEUR u ON u.id_utilisateur = s.id_proprietaire
+        WHERE s.id_serveur = :id
+        LIMIT 1
+    ');
+    $stmt->execute([':id' => $serverId]);
+    $server = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+} catch (PDOException $e) {
+    error_log(sprintf('[Boötes][ServeurPublic] Erreur chargement fiche serveur : %s', $e->getMessage()));
+}
+
+if ($server === null || ((int) $server['est_public'] !== 1 && ($currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)))) {
+    ?>
+    <section class="public-server public-server--restricted">
+        <h1 class="public-server__title">Serveur introuvable ou privé</h1>
+        <p class="public-server__message">Ce serveur Minecraft n'est pas répertorié publiquement.</p>
+        <a href="/catalogue?type=serveur" class="public-server__btn">Retour aux serveurs publics</a>
+    </section>
+    <?php
+    return;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $currentUserId !== null) {
     $postCsrf = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null;
     $action   = Security::validateString($_POST['action'] ?? '', 1, 30) ?? '';
@@ -51,7 +93,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $currentUserId !== null) {
                 $note        = Security::validatePositiveInt($_POST['note'] ?? null);
                 $commentaire = Security::validateString($_POST['commentaire'] ?? '', 5, 1000);
 
-                if ($note === null || $note < 1 || $note > 5 || $commentaire === null) {
+                if ((int) $server['id_proprietaire'] === $currentUserId) {
+                    $feedbackError = 'Vous ne pouvez pas évaluer votre propre serveur.';
+                } elseif ($note === null || $note < 1 || $note > 5 || $commentaire === null) {
                     $feedbackError = 'Veuillez attribuer une note de 1 à 5 et saisir un commentaire valide.';
                 } else {
                     $rateStmt = $db->prepare('
@@ -94,47 +138,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $currentUserId !== null) {
             $feedbackError = 'Impossible d\'enregistrer votre action pour le moment.';
         }
     }
-}
-
-$server = null;
-try {
-    $stmt = $db->prepare('
-        SELECT 
-            s.id_serveur,
-            s.id_proprietaire,
-            s.nom_serveur,
-            s.adresse_ip,
-            s.port,
-            s.version_mc,
-            s.mode_jeu,
-            s.statut,
-            s.joueurs_connectes,
-            s.slots_max,
-            s.ram_allouee,
-            s.description,
-            s.est_public,
-            s.date_creation,
-            u.pseudo AS proprietaire_pseudo
-        FROM SERVEUR s
-        INNER JOIN UTILISATEUR u ON u.id_utilisateur = s.id_proprietaire
-        WHERE s.id_serveur = :id
-        LIMIT 1
-    ');
-    $stmt->execute([':id' => $serverId]);
-    $server = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
-} catch (PDOException $e) {
-    error_log(sprintf('[Boötes][ServeurPublic] Erreur chargement fiche serveur : %s', $e->getMessage()));
-}
-
-if ($server === null || ((int) $server['est_public'] !== 1 && ($currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)))) {
-    ?>
-    <section class="public-server public-server--restricted">
-        <h1 class="public-server__title">Serveur introuvable ou privé</h1>
-        <p class="public-server__message">Ce serveur Minecraft n'est pas répertorié publiquement.</p>
-        <a href="/catalogue?type=serveur" class="public-server__btn">Retour aux serveurs publics</a>
-    </section>
-    <?php
-    return;
 }
 
 $isOnline       = strtoupper((string) $server['statut']) === 'EN_LIGNE';

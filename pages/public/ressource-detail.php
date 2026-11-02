@@ -4,9 +4,13 @@ declare(strict_types=1);
 
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
+use Bootes\Src\Http;
+use Bootes\Src\RateLimiter;
+use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
 
-$db = $db ?? Database::getInstance();
+$db              = $db ?? Database::getInstance();
+$resourceManager = new ResourceManager($db);
 
 $resourceId    = Security::validatePositiveInt($_GET['id'] ?? $_POST['resource_id'] ?? null);
 $currentUserId = Auth::getUserId();
@@ -66,6 +70,20 @@ if ($resource === null) {
 
 $isCreator   = $currentUserId !== null && $currentUserId === (int) $resource['id_auteur'];
 $canModerate = $isCreator || Auth::isAdmin();
+$isAvailable = ResourceManager::isPubliclyAvailable($resource);
+
+// Une ressource en attente ou suspendue n'est visible que de son auteur et des administrateurs.
+if (!$isAvailable && !$canModerate) {
+    http_response_code(404);
+    ?>
+    <section class="resource-detail resource-detail--not-found">
+        <h1 class="resource-detail__title">Ressource indisponible</h1>
+        <p class="resource-detail__message">Ce mod, plugin ou modpack n'existe pas ou a été retiré du catalogue par la modération.</p>
+        <a href="/catalogue" class="resource-detail__back-link">Retourner au catalogue</a>
+    </section>
+    <?php
+    return;
+}
 
 // Traitement des formulaires POST (Téléchargement, Installation sur serveur, Avis, Signalement, Modération)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -74,32 +92,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!Security::verifyCsrfToken($postCsrf)) {
         $feedbackError = 'Jeton CSRF invalide. Veuillez recharger la page.';
+    } elseif (!$isAvailable && in_array($action, ['install_on_server', 'add_review', 'report'], true)) {
+        $feedbackError = 'Cette ressource n\'est pas validée : action indisponible.';
     } else {
         try {
             if ($action === 'download') {
-                $upd = $db->prepare('UPDATE RESSOURCE SET nb_telechargements = nb_telechargements + 1 WHERE id_ressource = :id');
-                $upd->execute([':id' => $resourceId]);
-                $resource['nb_telechargements'] = (int) $resource['nb_telechargements'] + 1;
-                $feedbackMessage = 'Téléchargement de la ressource lancé.';
+                $latestFile = $resourceManager->getLatestVersionFile($resourceId);
+                $filePath   = $latestFile !== null ? $resourceManager->resolveStoredFile((string) $latestFile['chemin_fichier']) : null;
+
+                if ($latestFile === null || $filePath === null) {
+                    $feedbackError = 'Aucun fichier n\'est encore disponible au téléchargement pour cette ressource.';
+                } else {
+                    $resourceManager->registerDownload($resourceId, (int) $latestFile['id_fichier']);
+                    $extension = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+                    Http::sendFile(
+                        $filePath,
+                        (string) $latestFile['nom_fichier'],
+                        ResourceManager::ALLOWED_ARCHIVE_EXTENSIONS[$extension] ?? 'application/octet-stream'
+                    );
+                }
             } elseif ($action === 'install_on_server' && $currentUserId !== null) {
                 $targetServerId = Security::validatePositiveInt($_POST['target_server_id'] ?? null);
-                if ($targetServerId !== null && Auth::canManageServer($currentUserId, $targetServerId, $db)) {
-                    $installStmt = $db->prepare('
-                        INSERT INTO INSTALLER_RESSOURCE (id_serveur, id_ressource, date_installation)
-                        VALUES (:server_id, :res_id, NOW())
-                        ON DUPLICATE KEY UPDATE date_installation = NOW()
-                    ');
-                    $installStmt->execute([
-                        ':server_id' => $targetServerId,
-                        ':res_id'    => $resourceId,
-                    ]);
-                    $upd = $db->prepare('UPDATE RESSOURCE SET nb_telechargements = nb_telechargements + 1 WHERE id_ressource = :id');
-                    $upd->execute([':id' => $resourceId]);
-                    $resource['nb_telechargements'] = (int) $resource['nb_telechargements'] + 1;
-                    $feedbackMessage = sprintf('La ressource a été installée avec succès sur votre serveur #%d.', $targetServerId);
+                if ($targetServerId !== null && Auth::canManageServer($currentUserId, $targetServerId, $db, Auth::SERVER_PERM_FULL)) {
+                    $install = $resourceManager->installOnServer($targetServerId, $resourceId);
+                    if ($install['success']) {
+                        $feedbackMessage = sprintf('La ressource a été installée avec succès sur votre serveur #%d.', $targetServerId);
+                    } else {
+                        $feedbackError = $install['message'];
+                    }
                 } else {
-                    $feedbackError = 'Vous n\'avez pas les droits nécessaires sur le serveur sélectionné.';
+                    $feedbackError = 'Vous n\'avez pas les droits nécessaires (niveau COMPLET) sur le serveur sélectionné.';
                 }
+            } elseif ($action === 'add_review' && $currentUserId !== null && $isCreator) {
+                $feedbackError = 'Vous ne pouvez pas évaluer votre propre ressource.';
             } elseif ($action === 'add_review' && $currentUserId !== null) {
                 $note        = Security::validatePositiveInt($_POST['note'] ?? null);
                 $commentaire = Security::validateString($_POST['commentaire'] ?? '', 5, 1000);
@@ -123,8 +148,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif ($action === 'report' && $currentUserId !== null) {
                 $motif       = Security::validateString($_POST['motif'] ?? '', 3, 100);
                 $description = Security::validateString($_POST['description_signalement'] ?? '', 10, 1000);
+                $reportKey   = 'report:user:' . $currentUserId;
+                $limiter     = RateLimiter::default();
 
-                if ($motif === null || $description === null) {
+                if ($limiter->tooManyAttempts($reportKey, 10)) {
+                    $feedbackError = 'Vous avez envoyé trop de signalements récemment. Réessayez plus tard.';
+                } elseif ($motif === null || $description === null) {
                     $feedbackError = 'Veuillez préciser un motif et détailler votre signalement (10 caractères minimum).';
                 } else {
                     $reportStmt = $db->prepare('
@@ -139,6 +168,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ':description' => $description,
                         ':statut'      => 'EN_ATTENTE',
                     ]);
+                    $limiter->hit($reportKey, 3600);
                     $feedbackMessage = 'Signalement transmis à l\'équipe de modération Boötes.';
                 }
             } elseif ($action === 'moderate_delete' && $canModerate) {
@@ -273,7 +303,7 @@ if ($currentUserId !== null) {
                 <form action="/ressource-detail?id=<?= $resourceId ?>" method="post" class="resource-detail__inline-form">
                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                     <input type="hidden" name="action" value="moderate_delete">
-                    <button type="submit" class="resource-detail__btn resource-detail__btn--danger">
+                    <button type="submit" class="resource-detail__btn resource-detail__btn--danger" data-confirm="Retirer cette ressource du catalogue public ?">
                         Suspendre / Retirer du catalogue
                     </button>
                 </form>
@@ -298,8 +328,12 @@ if ($currentUserId !== null) {
             <form action="/ressource-detail?id=<?= $resourceId ?>" method="post" class="resource-detail__download-form">
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="action" value="download">
-                <button type="submit" class="resource-detail__btn resource-detail__btn--primary">
-                    Télécharger l'archive (<?= Security::e((string) ($resource['chemin_fichier'] ?: 'Dernière version stable')) ?>)
+                <button type="submit" class="resource-detail__btn resource-detail__btn--primary" <?= empty($versionsList) ? 'disabled' : '' ?>>
+                    <?php if (empty($versionsList)): ?>
+                        Aucun fichier publié pour le moment
+                    <?php else: ?>
+                        Télécharger la dernière version (<?= Security::e((string) $versionsList[0]['nom_fichier']) ?>)
+                    <?php endif; ?>
                 </button>
             </form>
 

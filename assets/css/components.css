@@ -1,0 +1,148 @@
+/* Composants génériques : les sélecteurs d'attributs couvrent les classes BEM de toutes les pages */
+
+/* Messages de retour : succès, erreur, information */
+.alert,
+div[class*="__alert"],
+[class*="__notice"] {
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-3);
+}
+
+.alert p:last-child,
+div[class*="__alert"] p:last-child {
+    margin-bottom: 0;
+}
+
+.alert--success,
+div[class*="__alert--success"] {
+    background: var(--color-success-bg);
+    color: var(--color-success-text);
+}
+
+div[class*="__alert--error"] {
+    background: var(--color-error-bg);
+    color: var(--color-error-text);
+    font-weight: 500;
+}
+
+[class*="__notice"] {
+    background: var(--color-notice-bg);
+    color: var(--color-notice-text);
+}
+
+/* Formulaires */
+label {
+    display: block;
+    font-weight: 500;
+    margin-bottom: var(--space-1);
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+select,
+textarea {
+    width: 100%;
+    max-width: 32rem;
+    padding: var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font: inherit;
+}
+
+input[type="checkbox"] + label,
+input[type="radio"] + label {
+    display: inline;
+    font-weight: 400;
+}
+
+fieldset {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    margin: 0 0 var(--space-3);
+}
+
+fieldset:disabled {
+    opacity: 0.65;
+}
+
+[class*="__field"] {
+    margin-bottom: var(--space-3);
+}
+
+small,
+[class*="__help"] {
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+}
+
+/* Boutons (et liens présentés comme des boutons) */
+button,
+a[class*="__btn"] {
+    display: inline-block;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface-muted);
+    color: var(--color-text);
+    font: inherit;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+button[class*="__submit"],
+[class*="--primary"] {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: var(--color-primary-text);
+}
+
+button[class*="--danger"],
+button[class*="--kill"],
+button[class*="delete"],
+button[class*="remove"],
+button[class*="revoke"] {
+    border-color: var(--color-danger);
+    color: var(--color-danger);
+    background: transparent;
+}
+
+button:disabled,
+button[aria-busy="true"] {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+button[aria-busy="true"]::after {
+    content: " …";
+}
+
+form[class*="inline"],
+form[class*="power-form"],
+form[class*="table__form"],
+form[class*="list__form"] {
+    display: inline-block;
+    margin: 0 var(--space-1) var(--space-1) 0;
+}
+
+/* Panneaux : cartes de premier niveau, fond atténué pour les blocs imbriqués */
+.main section,
+.main article,
+.main aside,
+.error-panel {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    margin-bottom: var(--space-4);
+}
+
+.main section section,
+.main section article,
+.main section aside,
+.main article article {
+    border-color: transparent;
+    background: var(--color-surface-muted);
+}

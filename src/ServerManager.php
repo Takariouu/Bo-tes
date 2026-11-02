@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace Bootes\Src;
 
+use Bootes\Config\AppConfig;
+use FilesystemIterator;
 use PDO;
 use PDOException;
-use RuntimeException;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
 
 final class ServerManager
 {
@@ -15,6 +18,14 @@ final class ServerManager
     public const STANDARD_MAX_RAM_MB   = 2048; // 2 Go max pour un compte Standard
     public const STANDARD_MAX_BACKUPS  = 2;
     public const PREMIUM_MAX_BACKUPS   = 10;
+    public const STANDARD_MAX_SERVERS  = 3;
+    public const PREMIUM_MAX_SERVERS   = 10;
+    public const MAX_SLOTS             = 100;
+
+    public const PORT_RANGE_START     = 25565;
+    public const PORT_RANGE_END       = 26500;
+    public const MAP_PORT_RANGE_START = 26565;
+    public const MAP_PORT_RANGE_END   = 27500;
 
     public const STATUS_ONLINE      = 'EN_LIGNE';
     public const STATUS_OFFLINE     = 'HORS_LIGNE';
@@ -29,9 +40,31 @@ final class ServerManager
         'NEOFORGE' => 'NeoForge (Moderne)',
     ];
 
+    public const GAME_MODES = [
+        'SURVIE'   => 'Survie (Survival)',
+        'CREATIF'  => 'Créatif (Creative)',
+        'HARDCORE' => 'Hardcore',
+        'AVENTURE' => 'Aventure / Mini-jeux',
+        'MODDE'    => 'Survie Moddée',
+    ];
+
     public const LIST_WHITELIST = 'WHITELIST';
     public const LIST_BLACKLIST = 'BLACKLIST';
     public const LIST_OP        = 'OP';
+
+    /** Tables rattachées à un serveur, purgées avant sa suppression. */
+    private const SERVER_DEPENDENT_TABLES = [
+        'INSTALLER_RESSOURCE',
+        'ADMINISTRER_SERVEUR',
+        'ETRE_LISTER',
+        'BACKUP',
+        'HISTORIQUE_RESSOURCE',
+        'CONFIGURATION_MAP',
+        'CONNEXION_JOUEUR',
+        'AVIS_SERVEUR',
+    ];
+
+    private const LOG_TAIL_BYTES = 262144; // Lecture des 256 derniers Ko de latest.log au maximum
 
     private string $instancesBasePath;
     private string $backupsBasePath;
@@ -41,9 +74,8 @@ final class ServerManager
         ?string $instancesBasePath = null,
         ?string $backupsBasePath = null
     ) {
-        $rootDir = dirname(__DIR__);
-        $this->instancesBasePath = $instancesBasePath ?? ($rootDir . '/instances');
-        $this->backupsBasePath   = $backupsBasePath ?? ($rootDir . '/backups');
+        $this->instancesBasePath = $instancesBasePath ?? AppConfig::instancesPath();
+        $this->backupsBasePath   = $backupsBasePath ?? AppConfig::backupsPath();
     }
 
     /**
@@ -56,7 +88,7 @@ final class ServerManager
         }
 
         $stmt = $this->db->prepare('
-            SELECT 
+            SELECT
                 s.id_serveur,
                 s.id_proprietaire,
                 s.nom_serveur,
@@ -89,7 +121,7 @@ final class ServerManager
     /**
      * Calcule la RAM totale actuellement consommée par les serveurs Minecraft en ligne.
      */
-    public function getAllocatedRamMb(?int $excludeServerId = null): int
+    public function getAllocatedRamMb(?int $excludeServerId = null, ?int $ownerId = null): int
     {
         $sql = "
             SELECT COALESCE(SUM(ram_allouee), 0)
@@ -101,6 +133,11 @@ final class ServerManager
         if ($excludeServerId !== null && $excludeServerId > 0) {
             $sql .= ' AND id_serveur != :exclude_id';
             $params[':exclude_id'] = $excludeServerId;
+        }
+
+        if ($ownerId !== null && $ownerId > 0) {
+            $sql .= ' AND id_proprietaire = :owner_id';
+            $params[':owner_id'] = $ownerId;
         }
 
         $stmt = $this->db->prepare($sql);
@@ -143,7 +180,110 @@ final class ServerManager
     }
 
     /**
-     * Démarre un serveur Minecraft après vérification stricte du plafond de 6 Go de RAM.
+     * Nombre maximal de serveurs autorisé pour une offre.
+     */
+    public static function maxServersFor(string $accountTier): int
+    {
+        return strtoupper($accountTier) === Auth::ACCOUNT_PREMIUM ? self::PREMIUM_MAX_SERVERS : self::STANDARD_MAX_SERVERS;
+    }
+
+    /**
+     * Plafond de RAM par serveur pour un propriétaire : celui de son offre, réduit au quota fixé par l'administration.
+     */
+    public static function ramCeilingFor(string $accountTier, int $maxRamAllouable): int
+    {
+        $tierCeiling = strtoupper($accountTier) === Auth::ACCOUNT_PREMIUM ? self::HOST_MAX_MC_RAM_MB : self::STANDARD_MAX_RAM_MB;
+
+        return max(0, min($tierCeiling, $maxRamAllouable));
+    }
+
+    /**
+     * Crée un serveur après validation stricte des paramètres (listes blanches) et contrôle des quotas du propriétaire.
+     *
+     * @param array<string, mixed> $input Données du formulaire (nom_serveur, version_mc, mode_jeu, ram_allouee, slots_max, description, est_public)
+     * @return array{success: bool, message: string, server_id?: int}
+     */
+    public function createServer(int $ownerId, array $input, bool $bypassQuotas = false): array
+    {
+        $ownerStmt = $this->db->prepare('SELECT type_compte, max_ram_allouable FROM UTILISATEUR WHERE id_utilisateur = :uid LIMIT 1');
+        $ownerStmt->execute([':uid' => $ownerId]);
+        $owner = $ownerStmt->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($owner)) {
+            return ['success' => false, 'message' => 'Compte propriétaire introuvable.'];
+        }
+
+        $tier       = (string) ($owner['type_compte'] ?? Auth::ACCOUNT_STANDARD);
+        $isPremium  = strtoupper($tier) === Auth::ACCOUNT_PREMIUM;
+        $name       = Security::validateString($input['nom_serveur'] ?? null, 3, 50);
+        $version    = in_array($input['version_mc'] ?? null, ResourceManager::SUPPORTED_MC_VERSIONS, true) ? (string) $input['version_mc'] : null;
+        $gameMode   = is_string($input['mode_jeu'] ?? null) && array_key_exists(strtoupper($input['mode_jeu']), self::GAME_MODES)
+            ? strtoupper($input['mode_jeu'])
+            : null;
+        $ram        = Security::validateRamAllocation($input['ram_allouee'] ?? null, $isPremium || $bypassQuotas);
+        $slots      = max(2, min(self::MAX_SLOTS, Security::validatePositiveInt($input['slots_max'] ?? null) ?? 20));
+        $desc       = Security::validateString($input['description'] ?? '', 0, 500) ?? '';
+        $isPublic   = ($input['est_public'] ?? '') === '1' ? 1 : 0;
+
+        if ($name === null || $version === null || $gameMode === null) {
+            return ['success' => false, 'message' => 'Nom (3 à 50 caractères), version de Minecraft ou mode de jeu invalide.'];
+        }
+
+        $ramCeiling = $bypassQuotas ? self::HOST_MAX_MC_RAM_MB : self::ramCeilingFor($tier, (int) $owner['max_ram_allouable']);
+        if ($ram === null || $ram > $ramCeiling) {
+            return [
+                'success' => false,
+                'message' => sprintf('Allocation RAM invalide : entre 512 et %d Mo pour ce compte.', $ramCeiling),
+            ];
+        }
+
+        $countStmt = $this->db->prepare('SELECT COUNT(*) FROM SERVEUR WHERE id_proprietaire = :uid');
+        $countStmt->execute([':uid' => $ownerId]);
+        $maxServers = self::maxServersFor($tier);
+        if (!$bypassQuotas && (int) $countStmt->fetchColumn() >= $maxServers) {
+            return [
+                'success' => false,
+                'message' => sprintf('Quota atteint : %d serveur(s) maximum pour l\'offre %s.', $maxServers, strtoupper($tier)),
+            ];
+        }
+
+        return $this->withAllocationLock(function () use ($ownerId, $name, $version, $gameMode, $slots, $ram, $desc, $isPublic): array {
+            $port = $this->findFreePort();
+            if ($port === null) {
+                return ['success' => false, 'message' => 'Aucun port réseau disponible sur l\'hôte. Contactez le support.'];
+            }
+
+            $insert = $this->db->prepare("
+                INSERT INTO SERVEUR (
+                    id_proprietaire, nom_serveur, adresse_ip, port, version_mc, type_loader, mode_jeu,
+                    statut, joueurs_connectes, slots_max, ram_allouee, description, est_public, date_creation
+                ) VALUES (
+                    :owner, :nom, :ip, :port, :version, 'VANILLA', :mode,
+                    'HORS_LIGNE', 0, :slots, :ram, :desc, :public, NOW()
+                )
+            ");
+            $insert->execute([
+                ':owner'   => $ownerId,
+                ':nom'     => $name,
+                ':ip'      => 'play.bootes.local',
+                ':port'    => $port,
+                ':version' => $version,
+                ':mode'    => $gameMode,
+                ':slots'   => $slots,
+                ':ram'     => $ram,
+                ':desc'    => $desc,
+                ':public'  => $isPublic,
+            ]);
+
+            return [
+                'success'   => true,
+                'message'   => sprintf('Serveur "%s" créé avec succès sur le port %d.', $name, $port),
+                'server_id' => (int) $this->db->lastInsertId(),
+            ];
+        });
+    }
+
+    /**
+     * Démarre un serveur Minecraft après vérification du plafond global (6 Go) et du quota RAM du propriétaire.
      *
      * @return array{success: bool, message: string}
      */
@@ -159,28 +299,49 @@ final class ServerManager
         }
 
         $requiredRam = (int) $server['ram_allouee'];
-        $usedRam     = $this->getAllocatedRamMb($serverId);
-        $remaining   = self::HOST_MAX_MC_RAM_MB - $usedRam;
 
-        if (!$this->canAllocateRam($requiredRam, $serverId)) {
-            return [
-                'success' => false,
-                'message' => sprintf(
-                    'Plafond matériel atteint sur la machine Linux Mint : %d Mo demandés, mais seulement %d Mo disponibles sur les 6144 Mo (6 Go) réservés.',
-                    $requiredRam,
-                    max(0, $remaining)
-                ),
-            ];
+        // Le verrou empêche deux démarrages simultanés de dépasser ensemble les plafonds.
+        $result = $this->withAllocationLock(function () use ($server, $serverId, $requiredRam): array {
+            $remaining = self::HOST_MAX_MC_RAM_MB - $this->getAllocatedRamMb($serverId);
+            if (!$this->canAllocateRam($requiredRam, $serverId)) {
+                return [
+                    'success' => false,
+                    'message' => sprintf(
+                        'Plafond matériel atteint sur la machine Linux Mint : %d Mo demandés, mais seulement %d Mo disponibles sur les 6144 Mo (6 Go) réservés.',
+                        $requiredRam,
+                        max(0, $remaining)
+                    ),
+                ];
+            }
+
+            $ownerQuota = (int) $server['proprietaire_max_ram'];
+            $ownerUsed  = $this->getAllocatedRamMb($serverId, (int) $server['id_proprietaire']);
+            if ($ownerUsed + $requiredRam > $ownerQuota) {
+                return [
+                    'success' => false,
+                    'message' => sprintf(
+                        'Quota RAM du compte dépassé : %d Mo déjà utilisés + %d Mo demandés pour un quota de %d Mo. Arrêtez un autre serveur ou réduisez sa mémoire.',
+                        $ownerUsed,
+                        $requiredRam,
+                        $ownerQuota
+                    ),
+                ];
+            }
+
+            $stmt = $this->db->prepare('UPDATE SERVEUR SET statut = :statut WHERE id_serveur = :id');
+            $stmt->execute([
+                ':statut' => self::STATUS_ONLINE,
+                ':id'     => $serverId,
+            ]);
+
+            return ['success' => true, 'message' => ''];
+        });
+
+        if (!$result['success']) {
+            return $result;
         }
 
         $this->ensureServerDirectories($serverId);
-
-        $stmt = $this->db->prepare('UPDATE SERVEUR SET statut = :statut WHERE id_serveur = :id');
-        $stmt->execute([
-            ':statut' => self::STATUS_ONLINE,
-            ':id'     => $serverId,
-        ]);
-
         $this->appendLogLine(
             $serverId,
             sprintf(
@@ -290,7 +451,10 @@ final class ServerManager
     }
 
     /**
-     * Met à jour les paramètres de configuration du serveur.
+     * Met à jour les paramètres de configuration du serveur (listes blanches et quotas du propriétaire).
+     * La mémoire d'une instance en ligne ne peut pas être modifiée : le plafond n'est contrôlé qu'au démarrage.
+     *
+     * @return array{success: bool, message: string}
      */
     public function updateServerSettings(
         int $serverId,
@@ -302,27 +466,39 @@ final class ServerManager
         int $ramMb,
         bool $isPublic,
         string $description,
-        bool $allowPremiumRam = false
-    ): bool {
-        $cleanName   = Security::validateString($name, 3, 50);
-        $cleanVer    = Security::validateString($mcVersion, 3, 20);
-        $cleanLoader = strtoupper(trim($loader));
-        $cleanMode   = Security::validateString($gameMode, 3, 30);
-        $cleanDesc   = Security::validateString($description, 0, 1000) ?? '';
-        $validRam    = Security::validateRamAllocation($ramMb, $allowPremiumRam);
-
-        if (
-            $serverId <= 0 ||
-            $cleanName === null ||
-            $cleanVer === null ||
-            $cleanMode === null ||
-            $validRam === null ||
-            !array_key_exists($cleanLoader, self::ALLOWED_LOADERS)
-        ) {
-            return false;
+        bool $bypassOwnerQuota = false
+    ): array {
+        $server = $this->getServerById($serverId);
+        if ($server === null) {
+            return ['success' => false, 'message' => 'Serveur introuvable.'];
         }
 
-        $clampedSlots = max(2, min(200, $slotsMax));
+        $cleanName   = Security::validateString($name, 3, 50);
+        $cleanLoader = strtoupper(trim($loader));
+        $cleanMode   = strtoupper(trim($gameMode));
+        $cleanDesc   = Security::validateString($description, 0, 1000) ?? '';
+
+        if (
+            $cleanName === null ||
+            !in_array($mcVersion, ResourceManager::SUPPORTED_MC_VERSIONS, true) ||
+            !array_key_exists($cleanLoader, self::ALLOWED_LOADERS) ||
+            !array_key_exists($cleanMode, self::GAME_MODES)
+        ) {
+            return ['success' => false, 'message' => 'Paramètres invalides : vérifiez le nom, la version, le loader et le mode de jeu.'];
+        }
+
+        $ramCeiling = $bypassOwnerQuota
+            ? self::HOST_MAX_MC_RAM_MB
+            : self::ramCeilingFor((string) $server['proprietaire_offre'], (int) $server['proprietaire_max_ram']);
+        $validRam = Security::validateRamAllocation($ramMb, true);
+        if ($validRam === null || $validRam > $ramCeiling) {
+            return ['success' => false, 'message' => sprintf('Allocation RAM invalide : entre 512 et %d Mo pour ce serveur.', $ramCeiling)];
+        }
+
+        $isRunning = in_array($server['statut'], [self::STATUS_ONLINE, self::STATUS_STARTING], true);
+        if ($isRunning && $validRam !== (int) $server['ram_allouee']) {
+            return ['success' => false, 'message' => 'Arrêtez le serveur avant de modifier sa mémoire allouée.'];
+        }
 
         $stmt = $this->db->prepare('
             UPDATE SERVEUR
@@ -336,22 +512,24 @@ final class ServerManager
                 description = :desc
             WHERE id_serveur = :id
         ');
-
-        return $stmt->execute([
+        $stmt->execute([
             ':nom'    => $cleanName,
-            ':ver'    => $cleanVer,
+            ':ver'    => $mcVersion,
             ':loader' => $cleanLoader,
             ':mode'   => $cleanMode,
-            ':slots'  => $clampedSlots,
+            ':slots'  => max(2, min(self::MAX_SLOTS, $slotsMax)),
             ':ram'    => $validRam,
             ':pub'    => $isPublic ? 1 : 0,
             ':desc'   => $cleanDesc,
             ':id'     => $serverId,
         ]);
+
+        return ['success' => true, 'message' => 'Configuration du serveur enregistrée avec succès.'];
     }
 
     /**
-     * Lecture sécurisée des N dernières lignes du fichier logs/latest.log du serveur.
+     * Lecture sécurisée des N dernières lignes du fichier logs/latest.log du serveur,
+     * sans charger en mémoire un journal de taille arbitraire.
      *
      * @return array<int, string>
      */
@@ -371,10 +549,24 @@ final class ServerManager
             ];
         }
 
-        $lines = @file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        if (!is_array($lines)) {
+        $handle = @fopen($logFile, 'rb');
+        if ($handle === false) {
             return [];
         }
+
+        $size   = (int) (fstat($handle)['size'] ?? 0);
+        $length = min($size, self::LOG_TAIL_BYTES);
+        if ($length > 0) {
+            fseek($handle, -$length, SEEK_END);
+        }
+        $data = $length > 0 ? (string) fread($handle, $length) : '';
+        fclose($handle);
+
+        $lines = preg_split('/\R/', $data) ?: [];
+        if ($length < $size) {
+            array_shift($lines); // Première ligne potentiellement tronquée
+        }
+        $lines = array_values(array_filter($lines, static fn (string $line): bool => trim($line) !== ''));
 
         return array_slice($lines, -$maxLines);
     }
@@ -422,7 +614,7 @@ final class ServerManager
     }
 
     /**
-     * Crée une archive de sauvegarde (.tar.gz) dans /backups et l'enregistre en base.
+     * Crée une archive de sauvegarde (.tar.gz) dans le stockage privé et l'enregistre en base.
      *
      * @return array{success: bool, message: string}
      */
@@ -453,15 +645,15 @@ final class ServerManager
         $this->ensureServerDirectories($serverId);
 
         $timestamp   = date('Ymd_His');
-        $archiveName = sprintf('server_%d_backup_%s.tar.gz', $serverId, $timestamp);
+        $archiveName = sprintf('server_%d_backup_%s_%s.tar.gz', $serverId, $timestamp, bin2hex(random_bytes(4)));
         $archivePath = $this->backupsBasePath . '/' . $archiveName;
         $sourceDir   = $this->getServerInstanceDir($serverId);
 
-        // Création d'une archive .tar.gz réelle si PharData ou tar est disponible, sinon fichier d'archive compressé
+        // Création d'une archive .tar.gz réelle si tar est disponible, sinon manifeste compressé
         $fileSize = 0;
         if (is_dir($sourceDir)) {
             $tarCmd = sprintf(
-                'tar -czf %s -C %s . 2>/dev/null',
+                'tar -czf %s -C %s . 2>&1',
                 escapeshellarg($archivePath),
                 escapeshellarg($sourceDir)
             );
@@ -481,8 +673,13 @@ final class ServerManager
             ], JSON_PRETTY_PRINT);
             $gzData = gzencode((string) $manifestContent, 9);
             @file_put_contents($archivePath, $gzData !== false ? $gzData : $manifestContent);
-            $fileSize = is_file($archivePath) ? (int) filesize($archivePath) : 4096;
+            $fileSize = is_file($archivePath) ? (int) filesize($archivePath) : 0;
         }
+
+        if ($fileSize <= 0) {
+            return ['success' => false, 'message' => 'Écriture de l\'archive impossible : vérifiez les droits du stockage des sauvegardes.'];
+        }
+        @chmod($archivePath, 0640);
 
         $cleanLabel = Security::validateString($label, 0, 100) ?: sprintf('Sauvegarde du %s', date('d/m/Y H:i'));
 
@@ -531,27 +728,32 @@ final class ServerManager
             return ['success' => false, 'message' => 'Sauvegarde introuvable pour ce serveur.'];
         }
 
+        $archivePath = $this->getBackupArchivePath($backup);
+        if ($archivePath === null) {
+            return ['success' => false, 'message' => 'Le fichier de cette sauvegarde est absent du stockage.'];
+        }
+
         $server = $this->getServerById($serverId);
         if ($server !== null && $server['statut'] === self::STATUS_ONLINE) {
             $this->stopServer($serverId);
         }
 
-        $archiveName = basename((string) $backup['nom_fichier']);
-        $archivePath = $this->backupsBasePath . '/' . $archiveName;
-        $targetDir   = $this->getServerInstanceDir($serverId);
+        $this->ensureServerDirectories($serverId);
+        $untarCmd = sprintf(
+            'tar -xzf %s -C %s --no-same-owner --no-same-permissions 2>&1',
+            escapeshellarg($archivePath),
+            escapeshellarg($this->getServerInstanceDir($serverId))
+        );
+        @exec($untarCmd, $output, $returnVar);
 
-        if (is_file($archivePath) && is_dir($targetDir)) {
-            $untarCmd = sprintf(
-                'tar -xzf %s -C %s 2>/dev/null',
-                escapeshellarg($archivePath),
-                escapeshellarg($targetDir)
-            );
-            @exec($untarCmd);
+        if ($returnVar !== 0) {
+            error_log(sprintf('[Boötes][ServerManager] Échec restauration backup #%d : %s', $backupId, implode(' ', (array) $output)));
+            return ['success' => false, 'message' => 'L\'archive n\'a pas pu être extraite. Aucune donnée n\'a été restaurée.'];
         }
 
         $this->appendLogLine(
             $serverId,
-            sprintf('[BackupManager/INFO]: Restauration de l\'archive "%s" effectuée.', $archiveName)
+            sprintf('[BackupManager/INFO]: Restauration de l\'archive "%s" effectuée.', basename($archivePath))
         );
 
         return [
@@ -561,7 +763,7 @@ final class ServerManager
     }
 
     /**
-     * Supprime une sauvegarde en base et sur le disque (/backups).
+     * Supprime une sauvegarde en base et sur le disque.
      */
     public function deleteBackup(int $serverId, int $backupId): bool
     {
@@ -570,10 +772,8 @@ final class ServerManager
             return false;
         }
 
-        $archiveName = basename((string) $backup['nom_fichier']);
-        $archivePath = $this->backupsBasePath . '/' . $archiveName;
-
-        if (is_file($archivePath) && is_writable($archivePath)) {
+        $archivePath = $this->getBackupArchivePath($backup);
+        if ($archivePath !== null) {
             @unlink($archivePath);
         }
 
@@ -584,6 +784,24 @@ final class ServerManager
         ]);
 
         return $stmt->rowCount() > 0;
+    }
+
+    /**
+     * Chemin absolu de l'archive d'une sauvegarde dans le stockage privé (null si absente).
+     * Seul le nom de base est utilisé : aucune traversée de répertoire n'est possible.
+     *
+     * @param array<string, mixed> $backup
+     */
+    public function getBackupArchivePath(array $backup): ?string
+    {
+        $fileName = basename((string) ($backup['nom_fichier'] ?? ''));
+        if ($fileName === '' || $fileName === '.' || $fileName === '..') {
+            return null;
+        }
+
+        $path = $this->backupsBasePath . '/' . $fileName;
+
+        return is_file($path) ? $path : null;
     }
 
     /**
@@ -632,6 +850,66 @@ final class ServerManager
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
         return $row !== false ? $row : null;
+    }
+
+    /**
+     * Supprime un serveur et toutes ses données dépendantes dans une transaction.
+     * Si $purgeFiles est faux (transaction englobante), l'appelant efface les fichiers après validation.
+     */
+    public function deleteServer(int $serverId, bool $purgeFiles = true): bool
+    {
+        if ($serverId <= 0) {
+            return false;
+        }
+
+        $backupFiles    = array_column($this->getBackups($serverId), 'nom_fichier');
+        $ownTransaction = !$this->db->inTransaction();
+        if ($ownTransaction) {
+            $this->db->beginTransaction();
+        }
+
+        try {
+            foreach (self::SERVER_DEPENDENT_TABLES as $table) {
+                $this->db->prepare("DELETE FROM {$table} WHERE id_serveur = :sid")->execute([':sid' => $serverId]);
+            }
+
+            $delete = $this->db->prepare('DELETE FROM SERVEUR WHERE id_serveur = :sid');
+            $delete->execute([':sid' => $serverId]);
+            $deleted = $delete->rowCount() > 0;
+
+            if ($ownTransaction) {
+                $this->db->commit();
+            }
+        } catch (PDOException $e) {
+            if ($ownTransaction && $this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            error_log(sprintf('[Boötes][ServerManager] Suppression du serveur #%d impossible : %s', $serverId, $e->getMessage()));
+            return false;
+        }
+
+        if ($purgeFiles && $deleted) {
+            $this->purgeServerFiles($serverId, $backupFiles);
+        }
+
+        return $deleted;
+    }
+
+    /**
+     * Efface du disque le répertoire d'instance et les archives de sauvegarde d'un serveur supprimé.
+     *
+     * @param array<int, string> $backupFileNames
+     */
+    public function purgeServerFiles(int $serverId, array $backupFileNames): void
+    {
+        foreach ($backupFileNames as $fileName) {
+            $path = $this->getBackupArchivePath(['nom_fichier' => $fileName]);
+            if ($path !== null) {
+                @unlink($path);
+            }
+        }
+
+        self::removeDirectory($this->getServerInstanceDir($serverId));
     }
 
     /**
@@ -716,7 +994,11 @@ final class ServerManager
         $cleanPseudo = Security::validateString($pseudoMc, 3, 16);
         $upperType   = strtoupper(trim($listType));
 
-        if ($serverId <= 0 || $cleanPseudo === null) {
+        if (
+            $serverId <= 0 ||
+            $cleanPseudo === null ||
+            !in_array($upperType, [self::LIST_WHITELIST, self::LIST_BLACKLIST, self::LIST_OP], true)
+        ) {
             return false;
         }
 
@@ -744,13 +1026,12 @@ final class ServerManager
 
         try {
             $stmt = $this->db->prepare('
-                SELECT 
+                SELECT
                     ads.id_serveur,
                     ads.id_utilisateur,
                     COALESCE(ads.niveau_permission, \'COMPLET\') AS niveau_permission,
                     ads.date_attribution,
                     u.pseudo,
-                    u.email,
                     u.role
                 FROM ADMINISTRER_SERVEUR ads
                 INNER JOIN UTILISATEUR u ON u.id_utilisateur = ads.id_utilisateur
@@ -766,7 +1047,7 @@ final class ServerManager
     }
 
     /**
-     * Ajoute un co-administrateur sur un serveur dans ADMINISTRER_SERVEUR.
+     * Ajoute un co-administrateur (compte existant et actif) sur un serveur dans ADMINISTRER_SERVEUR.
      *
      * @return array{success: bool, message: string}
      */
@@ -781,23 +1062,35 @@ final class ServerManager
             return ['success' => false, 'message' => 'Le propriétaire possède déjà tous les droits sur ce serveur.'];
         }
 
-        $allowedPerms = ['LECTURE', 'CONSOLE', 'COMPLET'];
+        $userStmt = $this->db->prepare('SELECT est_banni FROM UTILISATEUR WHERE id_utilisateur = :uid LIMIT 1');
+        $userStmt->execute([':uid' => $targetUserId]);
+        $banned = $userStmt->fetchColumn();
+        if ($banned === false || (int) $banned === 1) {
+            return ['success' => false, 'message' => 'Ce compte Boötes est introuvable ou suspendu.'];
+        }
+
+        $allowedPerms = [Auth::SERVER_PERM_READ, Auth::SERVER_PERM_CONSOLE, Auth::SERVER_PERM_FULL];
         $cleanPerm    = in_array(strtoupper($permissionLevel), $allowedPerms, true)
             ? strtoupper($permissionLevel)
-            : 'COMPLET';
+            : Auth::SERVER_PERM_READ;
 
-        $stmt = $this->db->prepare('
-            INSERT INTO ADMINISTRER_SERVEUR (id_serveur, id_utilisateur, niveau_permission, date_attribution)
-            VALUES (:sid, :uid, :perm, NOW())
-            ON DUPLICATE KEY UPDATE niveau_permission = VALUES(niveau_permission)
-        ');
-        $stmt->execute([
-            ':sid'  => $serverId,
-            ':uid'  => $targetUserId,
-            ':perm' => $cleanPerm,
-        ]);
+        try {
+            $stmt = $this->db->prepare('
+                INSERT INTO ADMINISTRER_SERVEUR (id_serveur, id_utilisateur, niveau_permission, date_attribution)
+                VALUES (:sid, :uid, :perm, NOW())
+                ON DUPLICATE KEY UPDATE niveau_permission = VALUES(niveau_permission)
+            ');
+            $stmt->execute([
+                ':sid'  => $serverId,
+                ':uid'  => $targetUserId,
+                ':perm' => $cleanPerm,
+            ]);
+        } catch (PDOException $e) {
+            error_log(sprintf('[Boötes][ServerManager] Ajout co-admin impossible : %s', $e->getMessage()));
+            return ['success' => false, 'message' => 'Impossible d\'enregistrer ce co-administrateur.'];
+        }
 
-        return ['success' => true, 'message' => 'Accès co-administrateur accordé avec succès.'];
+        return ['success' => true, 'message' => sprintf('Accès co-administrateur (%s) accordé avec succès.', $cleanPerm)];
     }
 
     /**
@@ -822,6 +1115,27 @@ final class ServerManager
     }
 
     /**
+     * Valide un port de carte web : plage dédiée, sans collision avec un port de jeu ou une autre carte.
+     */
+    public function isMapPortAvailable(int $serverId, int $port): bool
+    {
+        if ($port < self::MAP_PORT_RANGE_START || $port > self::MAP_PORT_RANGE_END) {
+            return false;
+        }
+
+        $gameStmt = $this->db->prepare('SELECT 1 FROM SERVEUR WHERE port = :port LIMIT 1');
+        $gameStmt->execute([':port' => $port]);
+        if ($gameStmt->fetchColumn() !== false) {
+            return false;
+        }
+
+        $mapStmt = $this->db->prepare('SELECT 1 FROM CONFIGURATION_MAP WHERE port_map = :port AND id_serveur != :sid LIMIT 1');
+        $mapStmt->execute([':port' => $port, ':sid' => $serverId]);
+
+        return $mapStmt->fetchColumn() === false;
+    }
+
+    /**
      * Enregistre un point de mesure de consommation matérielle dans HISTORIQUE_RESSOURCE.
      */
     public function recordResourceSnapshot(int $serverId, int $ramUsedMb, float $cpuPct, int $playersCount): void
@@ -842,6 +1156,44 @@ final class ServerManager
         }
     }
 
+    /**
+     * Exécute une opération d'allocation (port, RAM) sous verrou nommé MariaDB pour éviter les accès concurrents.
+     *
+     * @param callable(): array{success: bool, message: string} $operation
+     * @return array{success: bool, message: string}
+     */
+    private function withAllocationLock(callable $operation): array
+    {
+        $lock = $this->db->query("SELECT GET_LOCK('bootes_allocation', 5)");
+        if ($lock === false || (int) $lock->fetchColumn() !== 1) {
+            return ['success' => false, 'message' => 'L\'hôte est occupé par une autre allocation, veuillez réessayer.'];
+        }
+
+        try {
+            return $operation();
+        } finally {
+            $this->db->query("SELECT RELEASE_LOCK('bootes_allocation')");
+        }
+    }
+
+    /**
+     * Plus petit port de jeu libre dans la plage réservée aux instances.
+     */
+    private function findFreePort(): ?int
+    {
+        $stmt = $this->db->prepare('SELECT port FROM SERVEUR WHERE port BETWEEN :start_port AND :end_port');
+        $stmt->execute([':start_port' => self::PORT_RANGE_START, ':end_port' => self::PORT_RANGE_END]);
+        $used = array_flip(array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN)));
+
+        for ($port = self::PORT_RANGE_START; $port <= self::PORT_RANGE_END; $port++) {
+            if (!isset($used[$port])) {
+                return $port;
+            }
+        }
+
+        return null;
+    }
+
     private function getServerInstanceDir(int $serverId): string
     {
         return $this->instancesBasePath . '/server_' . $serverId;
@@ -854,13 +1206,8 @@ final class ServerManager
 
     private function ensureServerDirectories(int $serverId): void
     {
-        $logDir = dirname($this->getServerLogFilePath($serverId));
-        if (!is_dir($logDir)) {
-            @mkdir($logDir, 0750, true);
-        }
-        if (!is_dir($this->backupsBasePath)) {
-            @mkdir($this->backupsBasePath, 0750, true);
-        }
+        AppConfig::ensureDirectory(dirname($this->getServerLogFilePath($serverId)));
+        AppConfig::ensureDirectory($this->backupsBasePath);
     }
 
     private function appendLogLine(int $serverId, string $line): void
@@ -869,5 +1216,29 @@ final class ServerManager
         $logFile = $this->getServerLogFilePath($serverId);
         $entry   = sprintf('[%s] %s%s', date('H:i:s'), $line, PHP_EOL);
         @file_put_contents($logFile, $entry, FILE_APPEND | LOCK_EX);
+    }
+
+    /**
+     * Suppression récursive d'un répertoire sans jamais suivre les liens symboliques.
+     */
+    private static function removeDirectory(string $directory): void
+    {
+        if (!is_dir($directory) || is_link($directory)) {
+            return;
+        }
+
+        $items = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($directory, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($items as $item) {
+            $path = $item->getPathname();
+            if ($item->isLink() || !$item->isDir()) {
+                @unlink($path);
+            } else {
+                @rmdir($path);
+            }
+        }
+        @rmdir($directory);
     }
 }

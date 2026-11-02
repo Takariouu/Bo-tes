@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../src/ServerManager.php';
 
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
+use Bootes\Src\Http;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
 
@@ -16,8 +17,12 @@ $serverId      = isset($activeServerId) && is_int($activeServerId)
     ? $activeServerId
     : Security::validatePositiveInt($_GET['id'] ?? $_POST['server_id'] ?? null);
 $currentUserId = Auth::getUserId();
+$accessLevel   = $serverId !== null && $currentUserId !== null
+    ? Auth::getServerAccessLevel($currentUserId, $serverId, $db)
+    : null;
+$canConfigure  = Auth::serverLevelAllows($accessLevel, Auth::SERVER_PERM_FULL);
 
-if ($serverId === null || $currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)) {
+if ($serverId === null || $currentUserId === null || $accessLevel === null) {
     http_response_code(403);
     ?>
     <section class="server-backups server-backups--forbidden">
@@ -47,6 +52,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!Security::verifyCsrfToken($postCsrf)) {
         $feedbackError = 'Jeton CSRF invalide.';
+    } elseif (!$canConfigure) {
+        // Les archives contiennent le monde et la configuration complète : niveau COMPLET exigé.
+        $feedbackError = Auth::serverPermissionError($accessLevel);
     } else {
         switch ($action) {
             case 'create_backup':
@@ -83,20 +91,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'download_backup':
                 $backupId = Security::validatePositiveInt($_POST['backup_id'] ?? null);
                 $backup   = $backupId !== null ? $serverManager->getBackupById($serverId, $backupId) : null;
-                if ($backup !== null) {
-                    $fileName = basename((string) $backup['nom_fichier']);
-                    $fullPath = dirname(__DIR__, 2) . '/backups/' . $fileName;
-                    if (is_file($fullPath) && is_readable($fullPath) && !headers_sent()) {
-                        header('Content-Type: application/gzip');
-                        header('Content-Disposition: attachment; filename="' . $fileName . '"');
-                        header('Content-Length: ' . (string) filesize($fullPath));
-                        readfile($fullPath);
-                        exit;
-                    }
-                    $feedbackMessage = sprintf('Préparation de l\'archive "%s" pour téléchargement.', $fileName);
-                } else {
-                    $feedbackError = 'Archive introuvable.';
+                $archive  = $backup !== null ? $serverManager->getBackupArchivePath($backup) : null;
+                if ($archive !== null && is_readable($archive)) {
+                    Http::sendFile($archive, basename($archive), 'application/gzip');
                 }
+                $feedbackError = 'Archive introuvable sur le stockage.';
                 break;
         }
     }
@@ -115,7 +114,7 @@ $maxQuota       = Auth::isAdmin()
                 Gestionnaire de Sauvegardes (Backups) — <?= Security::e((string) $server['nom_serveur']) ?>
             </h1>
             <p class="server-backups__subtitle">
-                Archives compressées <code>.tar.gz</code> stockées de manière isolée dans <code>/backups</code>.
+                Archives compressées <code>.tar.gz</code> conservées dans le stockage privé de l'hôte (inaccessible depuis le web).
                 Quota utilisé : <strong><?= count($backups) ?> / <?= $maxQuota ?></strong>.
             </p>
         </div>
@@ -133,6 +132,11 @@ $maxQuota       = Auth::isAdmin()
         </div>
     <?php endif; ?>
 
+    <?php if (!$canConfigure): ?>
+        <p class="server-backups__notice" role="note">
+            Votre accès (<?= Security::e((string) $accessLevel) ?>) permet de consulter les sauvegardes, pas de les créer, restaurer, télécharger ou supprimer.
+        </p>
+    <?php else: ?>
     <section class="server-backups__create-section" aria-labelledby="create-backup-title">
         <h2 id="create-backup-title" class="server-backups__section-title">Créer une nouvelle sauvegarde</h2>
         <form action="/serveur/backups?id=<?= $serverId ?>" method="post" class="backup-create-form">
@@ -157,6 +161,7 @@ $maxQuota       = Auth::isAdmin()
             </button>
         </form>
     </section>
+    <?php endif; ?>
 
     <section class="server-backups__list-section" aria-labelledby="backups-list-title">
         <h2 id="backups-list-title" class="server-backups__section-title">
@@ -186,12 +191,13 @@ $maxQuota       = Auth::isAdmin()
                             <td class="backups-table__cell"><?= round(((int) $bkp['taille_octets']) / 1024, 1) ?> Ko</td>
                             <td class="backups-table__cell"><?= Security::e((string) $bkp['date_creation']) ?></td>
                             <td class="backups-table__cell backups-table__cell--actions">
+                                <?php if ($canConfigure): ?>
                                 <form action="/serveur/backups?id=<?= $serverId ?>" method="post" class="backups-table__form">
                                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                     <input type="hidden" name="server_id" value="<?= $serverId ?>">
                                     <input type="hidden" name="backup_id" value="<?= $bkpId ?>">
                                     <input type="hidden" name="action" value="restore_backup">
-                                    <button type="submit" class="backups-table__btn backups-table__btn--restore">Restaurer</button>
+                                    <button type="submit" class="backups-table__btn backups-table__btn--restore" data-confirm="Restaurer cette sauvegarde ? Le serveur sera arrêté et ses fichiers actuels écrasés.">Restaurer</button>
                                 </form>
 
                                 <form action="/serveur/backups?id=<?= $serverId ?>" method="post" class="backups-table__form">
@@ -207,8 +213,11 @@ $maxQuota       = Auth::isAdmin()
                                     <input type="hidden" name="server_id" value="<?= $serverId ?>">
                                     <input type="hidden" name="backup_id" value="<?= $bkpId ?>">
                                     <input type="hidden" name="action" value="delete_backup">
-                                    <button type="submit" class="backups-table__btn backups-table__btn--delete">Supprimer</button>
+                                    <button type="submit" class="backups-table__btn backups-table__btn--delete" data-confirm="Supprimer définitivement cette sauvegarde ?">Supprimer</button>
                                 </form>
+                                <?php else: ?>
+                                    —
+                                <?php endif; ?>
                             </td>
                         </tr>
                     <?php endforeach; ?>

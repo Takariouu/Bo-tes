@@ -51,8 +51,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $chkRole->execute([':uid' => $targetUid]);
                     $targetUser = $chkRole->fetch(PDO::FETCH_ASSOC);
 
-                    if ($targetUser && strtoupper((string) $targetUser['role']) === Auth::ROLE_SUPER_ADMIN && !Auth::isSuperAdmin()) {
-                        $feedbackError = 'Impossible de bannir un Super-Administrateur.';
+                    if ($targetUser && !Auth::canAdministrate(Auth::getRole(), (string) $targetUser['role'])) {
+                        $feedbackError = 'Vous ne pouvez pas modifier le statut d\'un compte de rang égal ou supérieur au vôtre.';
                     } elseif ($targetUser) {
                         $upd = $db->prepare('UPDATE UTILISATEUR SET est_banni = :ban WHERE id_utilisateur = :uid');
                         $upd->execute([':ban' => $newBanVal, ':uid' => $targetUid]);
@@ -77,7 +77,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     : Auth::ACCOUNT_STANDARD;
                 $newRam    = $newTier === Auth::ACCOUNT_PREMIUM ? 4096 : 2048;
 
-                if ($targetUid !== null) {
+                $targetRole = $targetUid !== null ? Auth::getUserRole($targetUid, $db) : null;
+
+                if ($targetRole !== null && !Auth::canAdministrate(Auth::getRole(), $targetRole)) {
+                    $feedbackError = 'Vous ne pouvez pas modifier l\'offre d\'un compte de rang égal ou supérieur au vôtre.';
+                } elseif ($targetRole !== null) {
                     $upd = $db->prepare('UPDATE UTILISATEUR SET type_compte = :tier, max_ram_allouable = :ram WHERE id_utilisateur = :uid');
                     $upd->execute([
                         ':tier' => $newTier,
@@ -121,9 +125,9 @@ try {
     $uWhere  = ['1 = 1'];
     $uParams = [];
     if ($searchQuery !== '') {
-        $uWhere[]            = '(u.pseudo LIKE :q_pseudo OR u.email LIKE :q_email)';
-        $uParams[':q_pseudo'] = '%' . $searchQuery . '%';
-        $uParams[':q_email']  = '%' . $searchQuery . '%';
+        $uWhere[]            = '(u.pseudo LIKE :q_pseudo ESCAPE \'!\' OR u.email LIKE :q_email ESCAPE \'!\')';
+        $uParams[':q_pseudo'] = Security::likeContains($searchQuery);
+        $uParams[':q_email']  = Security::likeContains($searchQuery);
     }
     if ($statusFilter === 'STANDARD') {
         $uWhere[] = "UPPER(u.type_compte) = 'STANDARD' AND u.est_banni = 0";
@@ -161,9 +165,9 @@ try {
     $sWhere  = ['1 = 1'];
     $sParams = [];
     if ($searchQuery !== '') {
-        $sWhere[]           = '(s.nom_serveur LIKE :q_srv OR u.pseudo LIKE :q_owner)';
-        $sParams[':q_srv']   = '%' . $searchQuery . '%';
-        $sParams[':q_owner'] = '%' . $searchQuery . '%';
+        $sWhere[]           = '(s.nom_serveur LIKE :q_srv ESCAPE \'!\' OR u.pseudo LIKE :q_owner ESCAPE \'!\')';
+        $sParams[':q_srv']   = Security::likeContains($searchQuery);
+        $sParams[':q_owner'] = Security::likeContains($searchQuery);
     }
     if ($statusFilter === 'EN_LIGNE') {
         $sWhere[] = "s.statut = 'EN_LIGNE'";
@@ -199,9 +203,9 @@ try {
     $rWhere  = ['1 = 1'];
     $rParams = [];
     if ($searchQuery !== '') {
-        $rWhere[]            = '(r.nom_ressource LIKE :q_res OR u.pseudo LIKE :q_author)';
-        $rParams[':q_res']    = '%' . $searchQuery . '%';
-        $rParams[':q_author'] = '%' . $searchQuery . '%';
+        $rWhere[]            = '(r.nom_ressource LIKE :q_res ESCAPE \'!\' OR u.pseudo LIKE :q_author ESCAPE \'!\')';
+        $rParams[':q_res']    = Security::likeContains($searchQuery);
+        $rParams[':q_author'] = Security::likeContains($searchQuery);
     }
     if (in_array($statusFilter, ['MOD', 'PLUGIN', 'MOD_PACK'], true)) {
         $rWhere[]         = 'UPPER(r.type_ressource) = :r_type';
@@ -395,7 +399,7 @@ try {
                                             <input type="hidden" name="action" value="toggle_ban_user">
                                             <input type="hidden" name="user_id" value="<?= $uid ?>">
                                             <input type="hidden" name="ban_value" value="<?= $isBanned ? '0' : '1' ?>">
-                                            <button type="submit" class="directory-table__btn directory-table__btn--danger">
+                                            <button type="submit" class="directory-table__btn directory-table__btn--danger" <?= $isBanned ? '' : 'data-confirm="Bannir ce compte ? Ses serveurs seront arrêtés immédiatement."' ?>>
                                                 <?= $isBanned ? 'Débannir' : 'Bannir' ?>
                                             </button>
                                         </form>

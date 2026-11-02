@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../../src/ServerManager.php';
 
+use Bootes\Config\AppConfig;
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Security;
@@ -115,7 +116,10 @@ $load1m  = is_array($loadAvg) && isset($loadAvg[0]) ? round((float) $loadAvg[0],
 $load5m  = is_array($loadAvg) && isset($loadAvg[1]) ? round((float) $loadAvg[1], 2) : 0.0;
 $load15m = is_array($loadAvg) && isset($loadAvg[2]) ? round((float) $loadAvg[2], 2) : 0.0;
 
-$backupsDir = dirname(__DIR__, 2) . '/backups';
+$backupsDir = AppConfig::backupsPath();
+if (!is_dir($backupsDir)) {
+    $backupsDir = AppConfig::storagePath();
+}
 if (!is_dir($backupsDir)) {
     $backupsDir = __DIR__;
 }
@@ -179,7 +183,7 @@ try {
         <form action="/admin/hardware" method="post" class="admin-hardware__emergency-form">
             <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
             <input type="hidden" name="action" value="force_kill_all_overloaded">
-            <button type="submit" class="admin-hardware__btn admin-hardware__btn--emergency">
+            <button type="submit" class="admin-hardware__btn admin-hardware__btn--emergency" data-confirm="Arrêter de force TOUTES les instances en ligne ?">
                 Arrêt d'urgence global (Libérer toute la RAM MC)
             </button>
         </form>
@@ -335,7 +339,7 @@ try {
                                         <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                         <input type="hidden" name="action" value="force_kill_server">
                                         <input type="hidden" name="server_id" value="<?= $sid ?>">
-                                        <button type="submit" class="hardware-table__btn hardware-table__btn--kill">
+                                        <button type="submit" class="hardware-table__btn hardware-table__btn--kill" data-confirm="Forcer l'arrêt immédiat (SIGKILL) de ce serveur ?">
                                             Kill Processus (SIGKILL)
                                         </button>
                                     </form>
