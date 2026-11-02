@@ -373,7 +373,7 @@ $tests[] = ['Upload : contenu non-ZIP refusé, archive valide stockée sous un n
     $fields = ['action' => 'upload_version', 'resource_id' => 1, 'numero_version' => '1.php.', 'changelog' => 'Test', 'versions_mc' => ['1.21.4']];
 
     $alice->submit('/user/createur-edition?id=1', $fields, [
-        'archive_file' => ['name' => 'shell.jar', 'content' => '<?php system($_GET["c"]); ?>', 'type' => 'application/java-archive'],
+        'archive_file' => ['name' => 'shell.jar', 'content' => '<?php echo "ceci n est pas une archive"; ?>', 'type' => 'application/java-archive'],
     ]);
     check((int) $t->scalar('SELECT COUNT(*) FROM FICHIER_RESSOURCE') === 0, 'Un faux .jar (contenu PHP) doit être refusé');
 
