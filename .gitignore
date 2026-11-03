@@ -11,6 +11,9 @@
 /backups/
 /uploads/
 
+# Environnement de développement local (instance MariaDB, voir dev/start.sh)
+/.devdata/
+
 # Journaux, caches et fichiers d'éditeur
 *.log
 *.sqlite
