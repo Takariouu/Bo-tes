@@ -10,6 +10,7 @@ use Bootes\Src\Auth;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 if (!Auth::isAdmin()) {
     http_response_code(403);
@@ -214,7 +215,7 @@ try {
             <p class="admin-reports__eyebrow">Sécurité Communautaire &amp; Conformité</p>
             <h1 class="admin-reports__title">Centre de Modération des Signalements</h1>
             <p class="admin-reports__subtitle">
-                Examinez les signalements de la table <code>SIGNALEMENT</code> portant sur les serveurs, les ressources ou les comptes utilisateurs.
+                Examinez les signalements portant sur les serveurs, les ressources ou les comptes utilisateurs.
             </p>
         </div>
 
@@ -287,9 +288,9 @@ try {
                         <header class="moderation-card__header">
                             <div class="moderation-card__badges">
                                 <span class="moderation-card__id">Signalement #<?= $repId ?></span>
-                                <span class="moderation-card__type"><?= Security::e($cibleType) ?> #<?= $cibleId ?></span>
-                                <span class="moderation-card__motif">Motif : <?= Security::e((string) $rep['motif']) ?></span>
-                                <span class="moderation-card__status">Statut : <?= Security::e((string) $rep['statut']) ?></span>
+                                <span class="moderation-card__type"><?= Security::e(View::label('cible', $cibleType)) ?> #<?= $cibleId ?></span>
+                                <span class="moderation-card__motif">Motif : <?= Security::e(View::label('motif', $rep['motif'])) ?></span>
+                                <?= View::badge('signalement', $rep['statut']) ?>
                             </div>
                             <time class="moderation-card__date" datetime="<?= Security::e((string) $rep['date_signalement']) ?>">
                                 <?= Security::e((string) $rep['date_signalement']) ?>

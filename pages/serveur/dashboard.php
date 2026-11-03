@@ -10,6 +10,7 @@ use Bootes\Src\Auth;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 $db            = $db ?? Database::getInstance();
 $serverManager = new ServerManager($db);
@@ -212,13 +213,11 @@ try {
 <div class="server-dashboard">
     <header class="server-dashboard__header">
         <div class="server-dashboard__identity">
-            <span class="server-dashboard__status <?= $isOnline ? 'server-dashboard__status--online' : 'server-dashboard__status--offline' ?>">
-                <?= Security::e((string) $server['statut']) ?>
-            </span>
+            <?= View::badge('statut_serveur', $server['statut']) ?>
             <h1 class="server-dashboard__title"><?= Security::e((string) $server['nom_serveur']) ?></h1>
             <p class="server-dashboard__meta">
                 Adresse : <code><?= Security::e((string) $server['adresse_ip']) ?>:<?= (int) $server['port'] ?></code>
-                &bull; Loader : <strong><?= Security::e((string) $server['type_loader']) ?></strong> (MC <?= Security::e((string) $server['version_mc']) ?>)
+                &bull; Loader : <strong><?= Security::e(View::label('loader', $server['type_loader'])) ?></strong> (MC <?= Security::e((string) $server['version_mc']) ?>)
                 &bull; Propriétaire : <strong><?= Security::e((string) $server['proprietaire_pseudo']) ?></strong>
             </p>
         </div>
@@ -228,27 +227,21 @@ try {
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
                 <input type="hidden" name="action" value="start">
-                <button type="submit" class="server-dashboard__btn server-dashboard__btn--start" <?= $isOnline || !$canOperate ? 'disabled' : '' ?>>
-                    Démarrer
-                </button>
+                <button type="submit" class="server-dashboard__btn server-dashboard__btn--start" <?= $isOnline || !$canOperate ? 'disabled' : '' ?>><?= View::icon('play') ?> Démarrer</button>
             </form>
 
             <form action="/serveur/dashboard?id=<?= $serverId ?>" method="post" class="server-dashboard__power-form">
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
                 <input type="hidden" name="action" value="restart">
-                <button type="submit" class="server-dashboard__btn server-dashboard__btn--restart" <?= !$isOnline || !$canOperate ? 'disabled' : '' ?>>
-                    Redémarrer
-                </button>
+                <button type="submit" class="server-dashboard__btn server-dashboard__btn--restart" <?= !$isOnline || !$canOperate ? 'disabled' : '' ?>><?= View::icon('rotate-cw') ?> Redémarrer</button>
             </form>
 
             <form action="/serveur/dashboard?id=<?= $serverId ?>" method="post" class="server-dashboard__power-form">
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="server_id" value="<?= $serverId ?>">
                 <input type="hidden" name="action" value="stop">
-                <button type="submit" class="server-dashboard__btn server-dashboard__btn--stop" <?= !$isOnline || !$canOperate ? 'disabled' : '' ?> data-confirm="Arrêter le serveur ? Les joueurs connectés seront déconnectés.">
-                    Arrêter
-                </button>
+                <button type="submit" class="server-dashboard__btn server-dashboard__btn--stop" <?= !$isOnline || !$canOperate ? 'disabled' : '' ?> data-confirm="Arrêter le serveur ? Les joueurs connectés seront déconnectés."><?= View::icon('square') ?> Arrêter</button>
             </form>
 
             <?php if (Auth::isAdmin()): ?>
@@ -256,9 +249,7 @@ try {
                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                     <input type="hidden" name="server_id" value="<?= $serverId ?>">
                     <input type="hidden" name="action" value="force_kill">
-                    <button type="submit" class="server-dashboard__btn server-dashboard__btn--kill" title="Réservé aux Administrateurs Boötes" data-confirm="Forcer l'arrêt immédiat (SIGKILL) ? Les données non sauvegardées seront perdues.">
-                        Arrêt Forcé (SIGKILL)
-                    </button>
+                    <button type="submit" class="server-dashboard__btn server-dashboard__btn--kill" title="Réservé aux Administrateurs Boötes" data-confirm="Forcer l'arrêt immédiat (SIGKILL) ? Les données non sauvegardées seront perdues."><?= View::icon('zap') ?> Arrêt forcé</button>
                 </form>
             <?php endif; ?>
         </div>
@@ -446,7 +437,7 @@ try {
                         <select id="quick-res-select" name="resource_id" required class="quick-install-form__select">
                             <?php foreach ($compatibleItems as $ci): ?>
                                 <option value="<?= (int) $ci['id_ressource'] ?>">
-                                    [<?= Security::e((string) $ci['type_ressource']) ?>] <?= Security::e((string) $ci['nom_ressource']) ?>
+                                    [<?= Security::e(View::label('type_ressource', $ci['type_ressource'])) ?>] <?= Security::e((string) $ci['nom_ressource']) ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
@@ -464,7 +455,7 @@ try {
                     <?php foreach ($installedItems as $inst): ?>
                         <li class="installed-list__item">
                             <div class="installed-list__info">
-                                <span class="installed-list__badge"><?= Security::e((string) $inst['type_ressource']) ?></span>
+                                <span class="installed-list__badge"><?= Security::e(View::label('type_ressource', $inst['type_ressource'])) ?></span>
                                 <a href="/ressource-detail?id=<?= (int) $inst['id_ressource'] ?>" class="installed-list__name">
                                     <?= Security::e((string) $inst['nom_ressource']) ?>
                                 </a>

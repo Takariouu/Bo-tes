@@ -5,6 +5,9 @@ declare(strict_types=1);
 use Bootes\Src\Security;
 
 $searchAction   = isset($searchAction) && is_string($searchAction) ? $searchAction : '/catalogue';
+// Le catalogue affiche ses propres onglets de catégorie : il masque les puces et transmet le type en champ caché.
+$showCategories = !isset($searchShowCategories) || $searchShowCategories !== false;
+$hiddenFields   = isset($searchHidden) && is_array($searchHidden) ? $searchHidden : [];
 $searchQuery    = Security::validateString($_GET['q'] ?? '', 0, 100) ?? '';
 $selectedType   = Security::validateString($_GET['type'] ?? 'all', 1, 30) ?? 'all';
 $selectedVer    = Security::validateString($_GET['version'] ?? 'all', 1, 20) ?? 'all';
@@ -39,6 +42,9 @@ if (!array_key_exists($selectedVer, $allowedVersions)) {
 ?>
 <section class="search-bar" aria-label="Recherche et filtrage du catalogue">
     <form action="<?= Security::e($searchAction) ?>" method="get" class="search-bar__form" role="search">
+        <?php foreach ($hiddenFields as $hiddenName => $hiddenValue): ?>
+            <input type="hidden" name="<?= Security::e((string) $hiddenName) ?>" value="<?= Security::e((string) $hiddenValue) ?>">
+        <?php endforeach; ?>
         <div class="search-bar__field-group search-bar__field-group--query">
             <label for="bootes-search-input" class="search-bar__label">Rechercher</label>
             <input
@@ -52,6 +58,7 @@ if (!array_key_exists($selectedVer, $allowedVersions)) {
             >
         </div>
 
+        <?php if ($showCategories): ?>
         <fieldset class="search-bar__fieldset">
             <legend class="search-bar__legend">Catégorie</legend>
             <div class="search-bar__radios">
@@ -72,6 +79,7 @@ if (!array_key_exists($selectedVer, $allowedVersions)) {
                 <?php endforeach; ?>
             </div>
         </fieldset>
+        <?php endif; ?>
 
         <div class="search-bar__field-group search-bar__field-group--version">
             <label for="bootes-version-select" class="search-bar__label">Version Minecraft</label>

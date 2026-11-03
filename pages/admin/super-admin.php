@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Security;
+use Bootes\Src\View;
 
 // Contrôle strict : exclusivement accessible au Super-Administrateur
 if (!Auth::isSuperAdmin()) {
@@ -232,7 +233,7 @@ try {
             <input type="hidden" name="action" value="promote_admin">
 
             <label for="promote-identifier" class="promote-admin-form__label">
-                Promouvoir un utilisateur au rôle <code>ADMIN</code> (saisir son pseudonyme exact ou son adresse e-mail) :
+                Promouvoir un utilisateur au rôle d'administrateur (saisir son pseudonyme exact ou son adresse e-mail) :
             </label>
             <div class="promote-admin-form__controls">
                 <input
@@ -276,7 +277,7 @@ try {
                         </th>
                         <td class="admins-table__cell"><?= Security::e((string) $adm['email']) ?></td>
                         <td class="admins-table__cell">
-                            <span class="admins-table__badge"><?= Security::e((string) $adm['role']) ?></span>
+                            <?= View::badge('role', $adm['role']) ?>
                         </td>
                         <td class="admins-table__cell"><?= Security::e((string) $adm['date_inscription']) ?></td>
                         <td class="admins-table__cell">
@@ -304,7 +305,7 @@ try {
         <header class="super-admin__logs-header">
             <div class="super-admin__logs-heading">
                 <h2 id="audit-logs-title" class="super-admin__section-title">
-                    2. Journal d'Audit et de Sécurité Système (<code>LOG_SYSTEME</code>)
+                    2. Journal d'Audit et de Sécurité Système
                 </h2>
                 <p class="super-admin__section-desc">
                     Traçabilité horodatée des promotions, révocations, arrêts forcés JVM, décisions de modération et connexions au panel.
@@ -374,7 +375,7 @@ try {
                                 </time>
                             </td>
                             <td class="audit-table__cell">
-                                <span class="audit-table__level"><?= Security::e((string) $log['niveau']) ?></span>
+                                <?= View::badge('niveau_log', $log['niveau']) ?>
                             </td>
                             <th scope="row" class="audit-table__cell">
                                 <?= Security::e((string) $log['auteur_pseudo']) ?>

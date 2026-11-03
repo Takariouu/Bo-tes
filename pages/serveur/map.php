@@ -8,6 +8,7 @@ use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 $db            = $db ?? Database::getInstance();
 $serverManager = new ServerManager($db);
@@ -147,10 +148,10 @@ $mapPort      = (int) $mapConfig['port_map'];
     <header class="server-map__header">
         <div class="server-map__heading">
             <h1 class="server-map__title">
-                Map Interactive <?= Security::e($renderMode) ?> — <?= Security::e((string) $server['nom_serveur']) ?>
+                Carte du monde (<?= Security::e($renderMode) ?>)
             </h1>
             <p class="server-map__subtitle">
-                Visualisation spatiale du monde Minecraft et configuration temps réel (<code>CONFIGURATION_MAP</code>).
+                Visualisation spatiale du monde Minecraft et configuration temps réel.
             </p>
         </div>
     </header>

@@ -43,7 +43,7 @@ routage par liste blanche.
 4. **Schéma SQL** : il n'est pas versionné. À ajouter avec des clés étrangères explicites, `UNIQUE` sur `SERVEUR.port`, et un `id_utilisateur` nullable dans `LOG_SYSTEME`.
 5. **Sessions multiples** : un changement de mot de passe ne déconnecte pas les autres appareils (il faudrait une colonne de version de session).
 6. **Journal d'audit** : enregistrer aussi les échecs de connexion, bannissements et suppressions dans `LOG_SYSTEME`.
-7. **CI** : `workflow/gemini-review.yml` n'est jamais exécuté, car GitHub ne lit que `.github/workflows/`.
+7. **CI** : ~~`workflow/gemini-review.yml` n'est jamais exécuté~~ — corrigé le 04/11/2026 : déplacé dans `.github/workflows/` (le secret `GEMINI_API_KEY` doit exister sur GitHub).
 
 ## Migration depuis la version précédente
 

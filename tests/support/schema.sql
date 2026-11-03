@@ -100,6 +100,13 @@ CREATE TABLE AVIS_SERVEUR (
     PRIMARY KEY (id_serveur, id_utilisateur)
 );
 
+CREATE TABLE FAVORI_SERVEUR (
+    id_utilisateur  INTEGER NOT NULL REFERENCES UTILISATEUR (id_utilisateur) ON DELETE CASCADE,
+    id_serveur      INTEGER NOT NULL REFERENCES SERVEUR (id_serveur) ON DELETE CASCADE,
+    date_ajout      TEXT NOT NULL,
+    PRIMARY KEY (id_utilisateur, id_serveur)
+);
+
 CREATE TABLE RESSOURCE (
     id_ressource        INTEGER PRIMARY KEY AUTOINCREMENT,
     id_auteur           INTEGER NOT NULL REFERENCES UTILISATEUR (id_utilisateur),

@@ -9,6 +9,7 @@ use Bootes\Src\Auth;
 use Bootes\Src\Http;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
+use Bootes\Src\View;
 
 $db              = $db ?? Database::getInstance();
 $resourceManager = new ResourceManager($db);
@@ -334,14 +335,12 @@ $actionUrl         = $isEditMode && $resourceId !== null
 
                 <div class="version-form__field">
                     <label for="ver-file" class="version-form__label">Fichier binaire ou archive (.jar, .zip, .mrpack — 100 Mo max)</label>
-                    <input
-                        type="file"
-                        id="ver-file"
-                        name="archive_file"
-                        accept=".jar,.zip,.mrpack"
-                        required
-                        class="version-form__file-input"
-                    >
+                    <div class="dropzone" data-dropzone>
+                        <?= View::icon('upload', 'dropzone__icon') ?>
+                        <p class="dropzone__text"><strong>Glissez votre archive ici</strong> ou cliquez pour la choisir</p>
+                        <p class="dropzone__file" data-dropzone-file>Aucun fichier sélectionné</p>
+                        <input type="file" id="ver-file" name="archive_file" accept=".jar,.zip,.mrpack" required class="version-form__file-input dropzone__input">
+                    </div>
                 </div>
 
                 <div class="version-form__field">

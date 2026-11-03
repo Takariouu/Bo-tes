@@ -7,6 +7,7 @@ use Bootes\Src\Auth;
 use Bootes\Src\Http;
 use Bootes\Src\RateLimiter;
 use Bootes\Src\Security;
+use Bootes\Src\View;
 
 $db = $db ?? Database::getInstance();
 
@@ -118,187 +119,185 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $csrfToken = Security::generateCsrfToken();
 ?>
+<?php
+$isRegister = $mode === 'register';
+$pageHeading = Auth::isLogged()
+    ? 'Vous êtes déjà connecté'
+    : ($isRegister ? 'Créer votre compte' : 'Bon retour parmi nous');
+$pageIntro = Auth::isLogged()
+    ? 'Votre session est active sur cet appareil.'
+    : ($isRegister ? 'Rejoignez Boötes et lancez votre premier serveur en quelques minutes.' : 'Connectez-vous pour retrouver vos serveurs Minecraft.');
+?>
 <section class="auth" aria-labelledby="auth-main-title">
     <div class="auth__container">
-        <header class="auth__header">
-            <h1 id="auth-main-title" class="auth__title">Portail d'authentification Boötes</h1>
-            <p class="auth__subtitle">Accédez à vos serveurs Minecraft ou rejoignez l'infrastructure.</p>
-        </header>
-
-        <?php if ($successMessage !== null): ?>
-            <div class="auth__alert auth__alert--success" role="status">
-                <p class="auth__alert-text"><?= Security::e($successMessage) ?></p>
+        <div class="auth__brand">
+            <div class="auth__brand-head">
+                <span class="auth__symbol" aria-hidden="true"></span>
+                <span class="brand-logo brand-logo--horizontal auth__logo" role="img" aria-label="Boötes"></span>
+                <p class="auth__slogan">Transformer le vide en lieu de vie</p>
             </div>
-        <?php endif; ?>
+            <ul class="auth__benefits">
+                <li class="auth__benefit"><?= View::icon('server') ?> <span>Jusqu'à 3 serveurs Minecraft gratuits</span></li>
+                <li class="auth__benefit"><?= View::icon('blocks') ?> <span>Mods, plugins et modpacks installés en un clic</span></li>
+                <li class="auth__benefit"><?= View::icon('users') ?> <span>Une gestion partagée avec vos amis</span></li>
+                <li class="auth__benefit"><?= View::icon('shield-check') ?> <span>Mots de passe chiffrés avec Argon2id</span></li>
+            </ul>
+        </div>
 
-        <?php if (!empty($errors)): ?>
-            <div class="auth__alert auth__alert--error" role="alert">
-                <h2 class="auth__alert-title">Impossible de valider le formulaire :</h2>
-                <ul class="auth__error-list">
-                    <?php foreach ($errors as $error): ?>
-                        <li class="auth__error-item"><?= Security::e($error) ?></li>
-                    <?php endforeach; ?>
-                </ul>
-            </div>
-        <?php endif; ?>
+        <div class="auth__main">
+            <header class="auth__header">
+                <h1 id="auth-main-title" class="auth__title"><?= Security::e($pageHeading) ?></h1>
+                <p class="auth__subtitle"><?= Security::e($pageIntro) ?></p>
+            </header>
 
-        <?php if (Auth::isLogged()): ?>
-            <?php $targetDashboard = Auth::isAdmin() ? '/admin/dashboard' : '/user/compte'; ?>
-            <article class="auth__card auth__card--logged">
-                <h2 class="auth__card-title">Vous êtes déjà connecté</h2>
-                <p class="auth__card-text">
-                    Connecté en tant que <strong><?= Security::e((string) ($_SESSION['user']['pseudo'] ?? '')) ?></strong>
-                    (Rôle : <?= Security::e(Auth::getRole()) ?>).
-                </p>
-                <div class="auth__actions">
-                    <a href="<?= Security::e($targetDashboard) ?>" class="auth__btn auth__btn--primary">Accéder à mon tableau de bord</a>
-                    <form action="/auth" method="post" class="auth__logout-form">
-                        <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                        <input type="hidden" name="action" value="logout">
-                        <button type="submit" class="auth__btn auth__btn--danger">Se déconnecter</button>
-                    </form>
+            <?php if ($successMessage !== null): ?>
+                <div class="auth__alert auth__alert--success" role="status">
+                    <p class="auth__alert-text"><?= Security::e($successMessage) ?></p>
                 </div>
-            </article>
-        <?php else: ?>
-            <nav class="auth__tabs" aria-label="Choix du mode d'authentification">
-                <a href="/auth?mode=login" class="auth__tab <?= $mode === 'login' ? 'auth__tab--active' : '' ?>">Connexion</a>
-                <a href="/auth?mode=register" class="auth__tab <?= $mode === 'register' ? 'auth__tab--active' : '' ?>">Inscription</a>
-            </nav>
+            <?php endif; ?>
 
-            <div class="auth__panels">
-                <?php if ($mode === 'login'): ?>
-                    <article class="auth__panel auth__panel--login" aria-labelledby="login-heading">
-                        <h2 id="login-heading" class="auth__panel-title">Connexion à votre compte</h2>
-                        <form action="/auth?mode=login" method="post" class="auth__form" novalidate>
+            <?php if (!empty($errors)): ?>
+                <div class="auth__alert auth__alert--error" role="alert">
+                    <p class="auth__alert-title"><strong>Impossible de valider le formulaire :</strong></p>
+                    <ul class="auth__error-list">
+                        <?php foreach ($errors as $error): ?>
+                            <li class="auth__error-item"><?= Security::e($error) ?></li>
+                        <?php endforeach; ?>
+                    </ul>
+                </div>
+            <?php endif; ?>
+
+            <?php if (Auth::isLogged()): ?>
+                <?php $targetDashboard = Auth::isAdmin() ? '/admin/dashboard' : '/user/compte'; ?>
+                <div class="auth__card auth__card--logged">
+                    <p class="auth__card-text">
+                        <span class="avatar avatar--lg" aria-hidden="true"><?= Security::e(View::initials((string) ($_SESSION['user']['pseudo'] ?? ''))) ?></span>
+                        <span>
+                            Connecté en tant que <strong><?= Security::e((string) ($_SESSION['user']['pseudo'] ?? '')) ?></strong><br>
+                            <?= View::badge('role', Auth::getRole()) ?>
+                        </span>
+                    </p>
+                    <div class="auth__actions">
+                        <a href="<?= Security::e($targetDashboard) ?>" class="auth__btn auth__btn--primary"><?= View::icon('layout-dashboard') ?> Accéder à mon espace</a>
+                        <form action="/auth" method="post" class="auth__logout-form">
+                            <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                            <input type="hidden" name="action" value="logout">
+                            <button type="submit" class="auth__btn auth__btn--logout"><?= View::icon('log-out') ?> Se déconnecter</button>
+                        </form>
+                    </div>
+                </div>
+            <?php else: ?>
+                <nav class="auth__tabs" aria-label="Choix du mode d'authentification">
+                    <a href="/auth?mode=login" class="auth__tab<?= !$isRegister ? ' auth__tab--active' : '' ?>"<?= !$isRegister ? ' aria-current="page"' : '' ?>>Connexion</a>
+                    <a href="/auth?mode=register" class="auth__tab<?= $isRegister ? ' auth__tab--active' : '' ?>"<?= $isRegister ? ' aria-current="page"' : '' ?>>Inscription</a>
+                </nav>
+
+                <?php if (!$isRegister): ?>
+                    <div class="auth__panel auth__panel--login">
+                        <h2 id="login-heading" class="visually-hidden">Connexion à votre compte</h2>
+                        <form action="/auth?mode=login" method="post" class="auth__form" aria-labelledby="login-heading" novalidate>
                             <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                             <input type="hidden" name="action" value="login">
 
                             <div class="auth__field">
                                 <label for="login-identifier" class="auth__label">Pseudo ou adresse e-mail</label>
-                                <input
-                                    type="text"
-                                    id="login-identifier"
-                                    name="identifier"
-                                    value="<?= Security::e((string) ($_POST['identifier'] ?? '')) ?>"
-                                    required
-                                    autocomplete="username"
-                                    class="auth__input"
-                                >
+                                <div class="input-icon">
+                                    <?= View::icon('user-round', 'input-icon__icon') ?>
+                                    <input type="text" id="login-identifier" name="identifier"
+                                           value="<?= Security::e((string) ($_POST['identifier'] ?? '')) ?>"
+                                           required autocomplete="username" class="auth__input">
+                                </div>
                             </div>
 
                             <div class="auth__field">
                                 <label for="login-password" class="auth__label">Mot de passe</label>
-                                <input
-                                    type="password"
-                                    id="login-password"
-                                    name="password"
-                                    required
-                                    autocomplete="current-password"
-                                    class="auth__input"
-                                >
+                                <div class="input-icon password-field">
+                                    <?= View::icon('lock', 'input-icon__icon') ?>
+                                    <input type="password" id="login-password" name="password" required autocomplete="current-password" class="auth__input">
+                                    <button type="button" class="password-field__toggle" data-password-toggle aria-label="Afficher le mot de passe" aria-pressed="false" hidden>
+                                        <?= View::icon('eye', 'password-field__show') ?>
+                                        <?= View::icon('eye-off', 'password-field__hide') ?>
+                                    </button>
+                                </div>
                             </div>
 
-                            <div class="auth__submit-group">
-                                <button type="submit" class="auth__submit">Se connecter</button>
-                            </div>
+                            <button type="submit" class="auth__submit"><?= View::icon('log-in') ?> Se connecter</button>
                         </form>
-                        <footer class="auth__panel-footer">
-                            <p class="auth__switch-text">
-                                Pas encore de compte ? <a href="/auth?mode=register" class="auth__switch-link">Créer un compte Standard gratuit</a>.
-                            </p>
-                        </footer>
-                    </article>
+                        <p class="auth__switch-text">
+                            Pas encore de compte ? <a href="/auth?mode=register" class="auth__switch-link">Créer un compte gratuit</a>
+                        </p>
+                    </div>
                 <?php else: ?>
-                    <article class="auth__panel auth__panel--register" aria-labelledby="register-heading">
-                        <h2 id="register-heading" class="auth__panel-title">Création d'un compte Boötes</h2>
-                        <form action="/auth?mode=register" method="post" class="auth__form" novalidate>
+                    <div class="auth__panel auth__panel--register">
+                        <h2 id="register-heading" class="visually-hidden">Création d'un compte Boötes</h2>
+                        <form action="/auth?mode=register" method="post" class="auth__form" aria-labelledby="register-heading" novalidate>
                             <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                             <input type="hidden" name="action" value="register">
 
                             <div class="auth__field">
-                                <label for="register-pseudo" class="auth__label">Nom d'utilisateur (Pseudo)</label>
-                                <input
-                                    type="text"
-                                    id="register-pseudo"
-                                    name="pseudo"
-                                    value="<?= Security::e((string) ($_POST['pseudo'] ?? '')) ?>"
-                                    minlength="3"
-                                    maxlength="32"
-                                    pattern="^[a-zA-Z0-9_-]{3,32}$"
-                                    required
-                                    autocomplete="username"
-                                    class="auth__input"
-                                >
-                                <small class="auth__help">3 à 32 caractères (lettres, chiffres, tirets et underscores).</small>
+                                <label for="register-pseudo" class="auth__label">Pseudo</label>
+                                <div class="input-icon">
+                                    <?= View::icon('user-round', 'input-icon__icon') ?>
+                                    <input type="text" id="register-pseudo" name="pseudo"
+                                           value="<?= Security::e((string) ($_POST['pseudo'] ?? '')) ?>"
+                                           minlength="3" maxlength="32" pattern="^[a-zA-Z0-9_-]{3,32}$" required
+                                           autocomplete="username" class="auth__input" aria-describedby="register-pseudo-help">
+                                </div>
+                                <small id="register-pseudo-help" class="auth__help">3 à 32 caractères : lettres, chiffres, tirets et underscores.</small>
                             </div>
 
                             <div class="auth__field">
                                 <label for="register-email" class="auth__label">Adresse e-mail</label>
-                                <input
-                                    type="email"
-                                    id="register-email"
-                                    name="email"
-                                    value="<?= Security::e((string) ($_POST['email'] ?? '')) ?>"
-                                    required
-                                    autocomplete="email"
-                                    class="auth__input"
-                                >
+                                <div class="input-icon">
+                                    <?= View::icon('mail', 'input-icon__icon') ?>
+                                    <input type="email" id="register-email" name="email"
+                                           value="<?= Security::e((string) ($_POST['email'] ?? '')) ?>"
+                                           required autocomplete="email" class="auth__input">
+                                </div>
                             </div>
 
                             <div class="auth__field">
-                                <label for="register-password" class="auth__label">Mot de passe (10 caractères minimum)</label>
-                                <input
-                                    type="password"
-                                    id="register-password"
-                                    name="password"
-                                    minlength="10"
-                                    required
-                                    autocomplete="new-password"
-                                    class="auth__input"
-                                >
-                                <small class="auth__help">Chiffré avec l'algorithme Argon2id.</small>
+                                <label for="register-password" class="auth__label">Mot de passe</label>
+                                <div class="input-icon password-field">
+                                    <?= View::icon('lock', 'input-icon__icon') ?>
+                                    <input type="password" id="register-password" name="password" minlength="10" required
+                                           autocomplete="new-password" class="auth__input" aria-describedby="register-password-strength">
+                                    <button type="button" class="password-field__toggle" data-password-toggle aria-label="Afficher le mot de passe" aria-pressed="false" hidden>
+                                        <?= View::icon('eye', 'password-field__show') ?>
+                                        <?= View::icon('eye-off', 'password-field__hide') ?>
+                                    </button>
+                                </div>
+                                <div class="password-strength" data-password-strength="register-password">
+                                    <span class="password-strength__bar" aria-hidden="true"><span class="password-strength__fill" data-level="0"></span></span>
+                                    <small id="register-password-strength" class="password-strength__label" aria-live="polite">10 caractères minimum</small>
+                                </div>
                             </div>
 
                             <div class="auth__field">
                                 <label for="register-password-confirm" class="auth__label">Confirmer le mot de passe</label>
-                                <input
-                                    type="password"
-                                    id="register-password-confirm"
-                                    name="password_confirm"
-                                    minlength="10"
-                                    required
-                                    autocomplete="new-password"
-                                    class="auth__input"
-                                >
+                                <div class="input-icon">
+                                    <?= View::icon('lock', 'input-icon__icon') ?>
+                                    <input type="password" id="register-password-confirm" name="password_confirm" minlength="10" required
+                                           autocomplete="new-password" class="auth__input">
+                                </div>
                             </div>
 
                             <div class="auth__field auth__field--checkbox">
-                                <input
-                                    type="checkbox"
-                                    id="register-accept-cgu"
-                                    name="accept_cgu"
-                                    value="1"
-                                    required
-                                    class="auth__checkbox"
-                                    <?= (!empty($_POST['accept_cgu']) && $_POST['accept_cgu'] === '1') ? 'checked' : '' ?>
-                                >
+                                <input type="checkbox" id="register-accept-cgu" name="accept_cgu" value="1" required class="auth__checkbox"
+                                    <?= (!empty($_POST['accept_cgu']) && $_POST['accept_cgu'] === '1') ? 'checked' : '' ?>>
                                 <label for="register-accept-cgu" class="auth__checkbox-label">
-                                    J'ai lu et j'accepte sans réserve les <a href="/cgu" target="_blank" rel="noopener" class="auth__cgu-link">Conditions Générales d'Utilisation</a> ainsi que la politique de confidentialité RGPD.
+                                    J'accepte les <a href="/cgu" target="_blank" rel="noopener" class="auth__cgu-link">Conditions générales d'utilisation</a> et la politique de confidentialité (RGPD).
                                 </label>
                             </div>
 
-                            <div class="auth__submit-group">
-                                <button type="submit" class="auth__submit">Créer mon compte</button>
-                            </div>
+                            <button type="submit" class="auth__submit"><?= View::icon('rocket') ?> Créer mon compte</button>
                         </form>
-                        <footer class="auth__panel-footer">
-                            <p class="auth__switch-text">
-                                Vous possédez déjà un compte ? <a href="/auth?mode=login" class="auth__switch-link">Connectez-vous ici</a>.
-                            </p>
-                        </footer>
-                    </article>
+                        <p class="auth__switch-text">
+                            Vous avez déjà un compte ? <a href="/auth?mode=login" class="auth__switch-link">Se connecter</a>
+                        </p>
+                    </div>
                 <?php endif; ?>
-            </div>
-        <?php endif; ?>
+            <?php endif; ?>
+        </div>
     </div>
 </section>

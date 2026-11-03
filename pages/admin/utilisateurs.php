@@ -10,6 +10,7 @@ use Bootes\Src\Auth;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 if (!Auth::isAdmin()) {
     http_response_code(403);
@@ -368,9 +369,9 @@ try {
                                     <br>
                                     <small><?= Security::e((string) $u['email']) ?></small>
                                 </th>
-                                <td class="directory-table__cell"><?= Security::e((string) $u['role']) ?></td>
+                                <td class="directory-table__cell"><?= View::badge('role', $u['role']) ?></td>
                                 <td class="directory-table__cell">
-                                    <?= Security::e((string) $u['type_compte']) ?> (<?= (int) $u['max_ram_allouable'] ?> Mo)
+                                    <?= Security::e(View::label('offre', $u['type_compte'])) ?> (<?= (int) $u['max_ram_allouable'] ?> Mo)
                                 </td>
                                 <td class="directory-table__cell">
                                     <span class="directory-table__status">
@@ -447,12 +448,12 @@ try {
                                     </a>
                                 </td>
                                 <td class="directory-table__cell">
-                                    MC <?= Security::e((string) $srv['version_mc']) ?> (<?= Security::e((string) $srv['mode_jeu']) ?>)
+                                    MC <?= Security::e((string) $srv['version_mc']) ?> (<?= Security::e(View::label('mode_jeu', $srv['mode_jeu'])) ?>)
                                 </td>
                                 <td class="directory-table__cell">
                                     <code>:<?= (int) $srv['port'] ?></code> &bull; <?= (int) $srv['ram_allouee'] ?> Mo
                                 </td>
-                                <td class="directory-table__cell"><?= Security::e((string) $srv['statut']) ?></td>
+                                <td class="directory-table__cell"><?= View::badge('statut_serveur', $srv['statut']) ?></td>
                                 <td class="directory-table__cell directory-table__cell--actions">
                                     <a href="/serveur/dashboard?id=<?= $sid ?>" class="directory-table__btn">Dashboard</a>
                                     <a href="/serveur/console?id=<?= $sid ?>" class="directory-table__btn">Console</a>
@@ -498,7 +499,7 @@ try {
                             <tr class="directory-table__row">
                                 <td class="directory-table__cell">#<?= $rid ?></td>
                                 <th scope="row" class="directory-table__cell"><?= Security::e((string) $res['nom_ressource']) ?></th>
-                                <td class="directory-table__cell"><?= Security::e((string) $res['type_ressource']) ?></td>
+                                <td class="directory-table__cell"><?= Security::e(View::label('type_ressource', $res['type_ressource'])) ?></td>
                                 <td class="directory-table__cell">
                                     <a href="/user/compte?id=<?= (int) $res['id_auteur'] ?>">
                                         <?= Security::e((string) $res['auteur_pseudo']) ?>
@@ -506,7 +507,7 @@ try {
                                 </td>
                                 <td class="directory-table__cell">MC <?= Security::e((string) $res['version_compatible']) ?></td>
                                 <td class="directory-table__cell"><?= (int) $res['nb_telechargements'] ?></td>
-                                <td class="directory-table__cell"><?= Security::e((string) $res['statut_moderation']) ?></td>
+                                <td class="directory-table__cell"><?= View::badge('moderation', $res['statut_moderation']) ?></td>
                                 <td class="directory-table__cell directory-table__cell--actions">
                                     <a href="/ressource-detail?id=<?= $rid ?>" class="directory-table__btn">Fiche</a>
                                     <a href="/user/createur-edition?id=<?= $rid ?>" class="directory-table__btn">Éditer</a>

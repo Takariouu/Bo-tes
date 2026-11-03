@@ -1,25 +1,81 @@
-/* Console et journaux du serveur */
-.terminal {
-    background: var(--color-terminal-bg);
-    color: var(--color-terminal-text);
-    border-radius: var(--radius);
-    margin-bottom: var(--space-3);
-    overflow: hidden;
-}
+/* =============================================================================
+   Console et journaux du serveur : toujours sur fond sombre, police monospace
+   ============================================================================= */
+@layer components {
+    .terminal,
+    .log-viewer {
+        margin: 0 0 var(--space-5);
+        overflow: hidden;
+        border: 1px solid var(--terminal-border);
+        border-radius: var(--radius-lg);
+        background: var(--terminal-bg);
+        box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        color: var(--terminal-text);
+        color-scheme: dark;
+    }
 
-.terminal__header {
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid #2a323d;
-    font-family: var(--font-mono);
-    font-size: 0.85rem;
-    opacity: 0.8;
-}
+    /* Barre de titre façon fenêtre de terminal */
+    .terminal__header {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        margin: 0;
+        padding: 0.65rem var(--space-4);
+        border-bottom: 1px solid var(--terminal-border);
+        background: var(--terminal-header);
+        color: var(--terminal-muted);
+        font-family: var(--font-mono);
+        font-size: var(--text-xs);
+    }
 
-.terminal__output {
-    margin: 0;
-    padding: var(--space-3);
-    max-height: 32rem;
-    overflow: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
+    .terminal__header::before {
+        content: "";
+        flex: none;
+        width: 0.65rem;
+        height: 0.65rem;
+        margin-right: 2.4rem;
+        border-radius: 50%;
+        background: #f87171;
+        box-shadow: 1.05rem 0 0 #fbbf24, 2.1rem 0 0 #4ade80;
+    }
+
+    .terminal__prompt {
+        overflow: hidden;
+        color: var(--terminal-prompt);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .terminal__output,
+    .log-viewer__pre {
+        max-height: 32rem;
+        margin: 0;
+        padding: var(--space-4);
+        overflow: auto;
+        background: transparent;
+        color: var(--terminal-text);
+        font-family: var(--font-mono);
+        font-size: 0.8125rem;
+        line-height: 1.65;
+        white-space: pre-wrap;
+        word-break: break-word;
+        scrollbar-color: #2a3550 transparent;
+    }
+
+    .terminal__code,
+    .log-viewer__code {
+        padding: 0;
+        border: 0;
+        background: none;
+        color: inherit;
+        font: inherit;
+        white-space: inherit;
+    }
+
+    /* Saisie des commandes */
+    .console-form input[type="text"],
+    .console-form input:not([type]) {
+        font-family: var(--font-mono);
+        font-size: var(--text-sm);
+    }
 }

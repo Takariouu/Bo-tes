@@ -9,6 +9,7 @@ use Bootes\Src\Auth;
 use Bootes\Src\Http;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 $db            = $db ?? Database::getInstance();
 $serverManager = new ServerManager($db);
@@ -111,10 +112,10 @@ $maxQuota       = Auth::isAdmin()
     <header class="server-backups__header">
         <div class="server-backups__heading">
             <h1 class="server-backups__title">
-                Gestionnaire de Sauvegardes (Backups) — <?= Security::e((string) $server['nom_serveur']) ?>
+                Sauvegardes
             </h1>
             <p class="server-backups__subtitle">
-                Archives compressées <code>.tar.gz</code> conservées dans le stockage privé de l'hôte (inaccessible depuis le web).
+                Archives <code>.zip</code> de votre monde, conservées dans le stockage privé de l'hôte (inaccessible depuis le web).
                 Quota utilisé : <strong><?= count($backups) ?> / <?= $maxQuota ?></strong>.
             </p>
         </div>
@@ -157,7 +158,7 @@ $maxQuota       = Auth::isAdmin()
             </div>
 
             <button type="submit" class="backup-create-form__submit" <?= count($backups) >= $maxQuota ? 'disabled' : '' ?>>
-                Générer l'archive .tar.gz
+                <?= View::icon('archive') ?> Créer la sauvegarde
             </button>
         </form>
     </section>
@@ -172,7 +173,7 @@ $maxQuota       = Auth::isAdmin()
             <p class="server-backups__empty">Aucune sauvegarde n'a encore été créée pour ce serveur.</p>
         <?php else: ?>
             <table class="backups-table">
-                <caption class="backups-table__caption">Historique des archives .tar.gz du serveur</caption>
+                <caption class="backups-table__caption">Historique des sauvegardes du serveur</caption>
                 <thead class="backups-table__head">
                     <tr class="backups-table__row">
                         <th scope="col" class="backups-table__cell">Libellé</th>
@@ -188,8 +189,8 @@ $maxQuota       = Auth::isAdmin()
                         <tr class="backups-table__row">
                             <th scope="row" class="backups-table__cell"><?= Security::e((string) $bkp['nom_backup']) ?></th>
                             <td class="backups-table__cell"><code><?= Security::e((string) $bkp['nom_fichier']) ?></code></td>
-                            <td class="backups-table__cell"><?= round(((int) $bkp['taille_octets']) / 1024, 1) ?> Ko</td>
-                            <td class="backups-table__cell"><?= Security::e((string) $bkp['date_creation']) ?></td>
+                            <td class="backups-table__cell"><?= Security::e(View::fileSize((int) $bkp['taille_octets'])) ?></td>
+                            <td class="backups-table__cell"><?= Security::e(View::date((string) $bkp['date_creation'], true)) ?></td>
                             <td class="backups-table__cell backups-table__cell--actions">
                                 <?php if ($canConfigure): ?>
                                 <form action="/serveur/backups?id=<?= $serverId ?>" method="post" class="backups-table__form">

@@ -8,6 +8,7 @@ use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 $db            = $db ?? Database::getInstance();
 $serverManager = new ServerManager($db);
@@ -166,10 +167,10 @@ try {
 <div class="server-access">
     <header class="server-access__header">
         <h1 class="server-access__title">
-            Accès Co-Administrateurs &amp; Listes Joueurs — <?= Security::e((string) $server['nom_serveur']) ?>
+            Accès et joueurs
         </h1>
         <p class="server-access__subtitle">
-            Déléguez la gestion du panel à vos amis (<code>ADMINISTRER_SERVEUR</code>) et contrôlez la Whitelist/Blacklist Minecraft (<code>ETRE_LISTER</code>).
+            Déléguez la gestion du serveur à vos amis et contrôlez les listes blanche, noire et des opérateurs.
         </p>
     </header>
 
@@ -256,7 +257,7 @@ try {
                         <?php foreach ($coAdmins as $ca): ?>
                             <tr class="coadmins-table__row">
                                 <th scope="row" class="coadmins-table__cell"><?= Security::e((string) $ca['pseudo']) ?></th>
-                                <td class="coadmins-table__cell"><?= Security::e((string) $ca['niveau_permission']) ?></td>
+                                <td class="coadmins-table__cell"><?= View::badge('acces', $ca['niveau_permission']) ?></td>
                                 <td class="coadmins-table__cell"><?= Security::e((string) $ca['date_attribution']) ?></td>
                                 <?php if ($isOwnerOrGlobalAdmin): ?>
                                     <td class="coadmins-table__cell">
@@ -279,7 +280,7 @@ try {
         <!-- 2. WHITELIST / BLACKLIST DES JOUEURS MINECRAFT (ETRE_LISTER) -->
         <section class="server-access__panel" aria-labelledby="playerlist-heading">
             <h2 id="playerlist-heading" class="server-access__panel-title">
-                Whitelist, Blacklist &amp; Opérateurs Minecraft (<code>ETRE_LISTER</code>)
+                Whitelist, Blacklist &amp; Opérateurs Minecraft
             </h2>
 
             <?php if ($canConfigure): ?>
@@ -351,7 +352,7 @@ try {
                             <tr class="playerlist-table__row">
                                 <th scope="row" class="playerlist-table__cell"><?= Security::e((string) $lp['pseudo_mc']) ?></th>
                                 <td class="playerlist-table__cell">
-                                    <span class="playerlist-table__badge"><?= Security::e((string) $lp['type_liste']) ?></span>
+                                    <?= View::badge('liste', $lp['type_liste']) ?>
                                 </td>
                                 <td class="playerlist-table__cell"><?= Security::e((string) ($lp['raison'] ?: '—')) ?></td>
                                 <td class="playerlist-table__cell"><?= Security::e((string) $lp['date_ajout']) ?></td>

@@ -8,6 +8,7 @@ use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 $db            = $db ?? Database::getInstance();
 $serverManager = new ServerManager($db);
@@ -74,16 +75,16 @@ $logLines = $serverManager->readLatestLog($serverId, 120);
     <header class="server-console__header">
         <div class="server-console__heading">
             <h1 id="console-title" class="server-console__title">
-                Console Temps Réel — <?= Security::e((string) $server['nom_serveur']) ?>
+                Console
             </h1>
             <p class="server-console__subtitle">
-                Statut : <strong><?= Security::e((string) $server['statut']) ?></strong>
+                Statut : <strong><?= Security::e(View::label('statut_serveur', $server['statut'])) ?></strong>
                 &bull; Flux direct depuis <code>logs/latest.log</code>
             </p>
         </div>
         <div class="server-console__actions">
             <a href="/serveur/console?id=<?= $serverId ?>" class="server-console__refresh-btn">Actualiser le flux</a>
-            <a href="/serveur/dashboard?id=<?= $serverId ?>" class="server-console__back-btn">Dashboard</a>
+            <a href="/serveur/dashboard?id=<?= $serverId ?>" class="server-console__back-btn">Tableau de bord</a>
         </div>
     </header>
 
@@ -105,7 +106,7 @@ $logLines = $serverManager->readLatestLog($serverId, 120);
         </div>
         <pre class="terminal__output"><code class="terminal__code"><?php
             foreach ($logLines as $line) {
-                echo Security::e($line) . "\n";
+                echo View::logLine($line) . "\n";
             }
         ?></code></pre>
     </div>
