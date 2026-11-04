@@ -33,7 +33,7 @@ $currentYear = (int) date('Y');
                         <a href="/catalogue" class="footer__link">Catalogue</a>
                     </li>
                     <li class="footer__item">
-                        <a href="/catalogue?type=serveur" class="footer__link">Serveurs publics</a>
+                        <a href="/serveurs" class="footer__link">Annuaire des serveurs</a>
                     </li>
                     <li class="footer__item">
                         <a href="/offres" class="footer__link">Offres</a>

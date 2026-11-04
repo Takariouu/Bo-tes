@@ -14,6 +14,9 @@ final class View
     public const THEME_LIGHT   = 'light';
     public const DEFAULT_THEME = self::THEME_DARK;
 
+    public const LIST_MODE_COOKIE = 'bootes_vue';
+    public const LIST_MODES       = ['liste', 'grille'];
+
     private const ICON_SPRITE = '/assets/img/icons.svg';
 
     /**
@@ -208,6 +211,22 @@ final class View
     }
 
     /**
+     * Nombre compact pour les listes : 950, 12,4 k, 1,2 M (sans « ,0 » inutile).
+     */
+    public static function compactNumber(int|float $value): string
+    {
+        foreach ([1_000_000 => 'M', 1_000 => 'k'] as $unit => $suffix) {
+            if ($value >= $unit) {
+                $scaled = round($value / $unit, 1);
+
+                return self::number($scaled, $scaled >= 100 || floor($scaled) === $scaled ? 0 : 1) . "\u{202F}" . $suffix;
+            }
+        }
+
+        return self::number($value);
+    }
+
+    /**
      * Taille lisible d'un fichier à partir d'un nombre d'octets (Ko, Mo, Go).
      */
     public static function fileSize(int|float $bytes): string
@@ -359,6 +378,72 @@ final class View
             : mb_substr($pseudo, 0, 2);
 
         return mb_strtoupper($letters);
+    }
+
+    /**
+     * Visuel carré d'un élément (icône de mod, logo de serveur) : l'image téléversée, sinon ses
+     * initiales sur une teinte tirée du nom (un projet garde toujours la même couleur).
+     */
+    public static function tile(?string $token, string $name, string $class = ''): string
+    {
+        $classes = trim('tile ' . $class);
+        if (MediaManager::isValidToken($token)) {
+            return sprintf(
+                '<img class="%s" src="%s" alt="" width="256" height="256" loading="lazy" decoding="async">',
+                Security::e($classes),
+                Security::e(MediaManager::url((string) $token))
+            );
+        }
+
+        return sprintf('<span class="%s tile--hue-%d" aria-hidden="true">%s</span>', Security::e($classes), self::hue($name), Security::e(self::initials($name)));
+    }
+
+    /**
+     * Photo de profil d'un compte, ou ses initiales.
+     */
+    public static function avatar(?string $token, string $pseudo, string $class = ''): string
+    {
+        $classes = trim('avatar ' . $class);
+        if (MediaManager::isValidToken($token)) {
+            return sprintf(
+                '<img class="%s avatar--photo" src="%s" alt="" width="192" height="192" loading="lazy" decoding="async">',
+                Security::e($classes),
+                Security::e(MediaManager::url((string) $token))
+            );
+        }
+
+        return sprintf('<span class="%s" aria-hidden="true">%s</span>', Security::e($classes), Security::e(self::initials($pseudo)));
+    }
+
+    /** Teinte déterministe (0 à 7) tirée d'un nom, pour les visuels par défaut. */
+    public static function hue(string $seed): int
+    {
+        return crc32(mb_strtolower($seed)) % 8;
+    }
+
+    /**
+     * Vue d'une liste : « liste » compacte (par défaut) ou « grille ». Le paramètre ?vue= est mémorisé
+     * un an dans un cookie, comme le thème.
+     */
+    public static function listMode(): string
+    {
+        $requested = $_GET['vue'] ?? null;
+        if (is_string($requested) && in_array($requested, self::LIST_MODES, true)) {
+            if (($_COOKIE[self::LIST_MODE_COOKIE] ?? null) !== $requested && !headers_sent()) {
+                setcookie(self::LIST_MODE_COOKIE, $requested, [
+                    'expires'  => time() + 31536000,
+                    'path'     => '/',
+                    'secure'   => Http::isHttps(),
+                    'samesite' => 'Lax',
+                ]);
+            }
+
+            return $requested;
+        }
+
+        $saved = $_COOKIE[self::LIST_MODE_COOKIE] ?? null;
+
+        return is_string($saved) && in_array($saved, self::LIST_MODES, true) ? $saved : 'liste';
     }
 
     private static function humanize(string $value): string

@@ -167,7 +167,7 @@ $renderLinks = static function (array $links, string $currentRoute): void {
     <aside class="sidebar sidebar--account" aria-label="Mon espace">
         <div class="sidebar__inner">
             <header class="sidebar__header sidebar__header--profile">
-                <span class="avatar" aria-hidden="true"><?= Security::e(View::initials((string) $sessionUser['pseudo'])) ?></span>
+                <?= View::avatar($userAvatar ?? null, (string) $sessionUser['pseudo']) ?>
                 <div>
                     <p class="sidebar__title"><?= Security::e((string) $sessionUser['pseudo']) ?></p>
                     <p class="sidebar__subtitle">

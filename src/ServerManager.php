@@ -91,6 +91,7 @@ final class ServerManager
             SELECT
                 s.id_serveur,
                 s.id_proprietaire,
+                s.origine,
                 s.nom_serveur,
                 s.adresse_ip,
                 s.port,
@@ -102,6 +103,11 @@ final class ServerManager
                 s.slots_max,
                 s.ram_allouee,
                 s.description,
+                s.resume,
+                s.etiquettes,
+                s.site_web,
+                s.discord,
+                s.date_verification,
                 s.est_public,
                 s.date_creation,
                 u.pseudo AS proprietaire_pseudo,
@@ -126,7 +132,7 @@ final class ServerManager
         $sql = "
             SELECT COALESCE(SUM(ram_allouee), 0)
             FROM SERVEUR
-            WHERE statut IN ('EN_LIGNE', 'DEMARRAGE')
+            WHERE statut IN ('EN_LIGNE', 'DEMARRAGE') AND origine = 'HEBERGE'
         ";
         $params = [];
 
@@ -236,7 +242,7 @@ final class ServerManager
             ];
         }
 
-        $countStmt = $this->db->prepare('SELECT COUNT(*) FROM SERVEUR WHERE id_proprietaire = :uid');
+        $countStmt = $this->db->prepare('SELECT COUNT(*) FROM SERVEUR WHERE id_proprietaire = :uid AND origine = \'HEBERGE\'');
         $countStmt->execute([':uid' => $ownerId]);
         $maxServers = self::maxServersFor($tier);
         if (!$bypassQuotas && (int) $countStmt->fetchColumn() >= $maxServers) {
@@ -264,7 +270,7 @@ final class ServerManager
             $insert->execute([
                 ':owner'   => $ownerId,
                 ':nom'     => $name,
-                ':ip'      => 'play.bootes.local',
+                ':ip'      => ServerDirectory::HOSTED_ADDRESS,
                 ':port'    => $port,
                 ':version' => $version,
                 ':mode'    => $gameMode,
@@ -863,6 +869,9 @@ final class ServerManager
         }
 
         $backupFiles    = array_column($this->getBackups($serverId), 'nom_fichier');
+        $mediaStmt      = $this->db->prepare("SELECT jeton FROM MEDIA WHERE type_cible = 'SERVEUR' AND id_cible = :sid");
+        $mediaStmt->execute([':sid' => $serverId]);
+        $mediaTokens    = array_map('strval', $mediaStmt->fetchAll(PDO::FETCH_COLUMN));
         $ownTransaction = !$this->db->inTransaction();
         if ($ownTransaction) {
             $this->db->beginTransaction();
@@ -871,6 +880,10 @@ final class ServerManager
         try {
             foreach (self::SERVER_DEPENDENT_TABLES as $table) {
                 $this->db->prepare("DELETE FROM {$table} WHERE id_serveur = :sid")->execute([':sid' => $serverId]);
+            }
+            // Fiche d'annuaire : images et mise en page personnalisée
+            foreach (['MEDIA', 'PAGE_PERSONNALISEE'] as $table) {
+                $this->db->prepare("DELETE FROM {$table} WHERE type_cible = 'SERVEUR' AND id_cible = :sid")->execute([':sid' => $serverId]);
             }
 
             $delete = $this->db->prepare('DELETE FROM SERVEUR WHERE id_serveur = :sid');
@@ -890,6 +903,7 @@ final class ServerManager
 
         if ($purgeFiles && $deleted) {
             $this->purgeServerFiles($serverId, $backupFiles);
+            MediaManager::deleteFiles($mediaTokens);
         }
 
         return $deleted;
@@ -1123,7 +1137,7 @@ final class ServerManager
             return false;
         }
 
-        $gameStmt = $this->db->prepare('SELECT 1 FROM SERVEUR WHERE port = :port LIMIT 1');
+        $gameStmt = $this->db->prepare('SELECT 1 FROM SERVEUR WHERE port = :port AND origine = \'HEBERGE\' LIMIT 1');
         $gameStmt->execute([':port' => $port]);
         if ($gameStmt->fetchColumn() !== false) {
             return false;
@@ -1181,7 +1195,7 @@ final class ServerManager
      */
     private function findFreePort(): ?int
     {
-        $stmt = $this->db->prepare('SELECT port FROM SERVEUR WHERE port BETWEEN :start_port AND :end_port');
+        $stmt = $this->db->prepare('SELECT port FROM SERVEUR WHERE origine = \'HEBERGE\' AND port BETWEEN :start_port AND :end_port');
         $stmt->execute([':start_port' => self::PORT_RANGE_START, ':end_port' => self::PORT_RANGE_END]);
         $used = array_flip(array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN)));
 

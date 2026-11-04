@@ -7,8 +7,10 @@ require_once __DIR__ . '/../../src/ResourceManager.php';
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Http;
+use Bootes\Src\MediaManager;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
+use Bootes\Src\ServerDirectory;
 use Bootes\Src\ServerManager;
 use Bootes\Src\UserManager;
 use Bootes\Src\View;
@@ -205,6 +207,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
 
                     Http::redirect('/admin/utilisateurs', 'Le compte utilisateur et ses données personnelles ont été purgés conformément au RGPD.');
+
+                case 'upload_avatar':
+                    $avatarResult = (new MediaManager($db))->storeUpload($_FILES['image'] ?? null, $targetUserId, MediaManager::TARGET_USER, $targetUserId, MediaManager::ROLE_AVATAR);
+                    if ($avatarResult['success']) {
+                        Http::redirect(($isAdminView ? '/user/compte?id=' . $targetUserId : '/user/compte') . '#section-profil', 'Photo de profil mise à jour.');
+                    }
+                    $feedbackError = $avatarResult['message'];
+                    break;
+
+                case 'delete_avatar':
+                    $avatarMedia = new MediaManager($db);
+                    foreach ($avatarMedia->forTarget(MediaManager::TARGET_USER, $targetUserId, MediaManager::ROLE_AVATAR) as $avatarImage) {
+                        $avatarMedia->delete((int) $avatarImage['id_media']);
+                    }
+                    $feedbackMessage = 'Photo de profil retirée.';
+                    break;
 
                 case 'create_server':
                     $creation = $serverManager->createServer($targetUserId, $_POST, $isAdminView && Auth::isAdmin());
@@ -429,7 +447,7 @@ try {
             s.est_public
         FROM SERVEUR s
         LEFT JOIN ADMINISTRER_SERVEUR ads ON ads.id_serveur = s.id_serveur
-        WHERE s.id_proprietaire = :uid_owner OR ads.id_utilisateur = :uid_coadmin
+        WHERE s.origine = \'HEBERGE\' AND (s.id_proprietaire = :uid_owner OR ads.id_utilisateur = :uid_coadmin)
         ORDER BY s.id_proprietaire = :uid_order DESC, s.date_creation DESC
     ');
     $srvStmt->execute([
@@ -554,6 +572,17 @@ try {
 }
 
 $formTargetUrl = $isAdminView ? '/user/compte?id=' . $targetUserId : '/user/compte';
+
+// Photo de profil et fiches de l'annuaire (serveurs externes référencés)
+$avatarToken   = null;
+$myListings    = [];
+$listingLimit  = ServerDirectory::maxListings(strtoupper((string) ($userProfile['type_compte'] ?? '')) === Auth::ACCOUNT_PREMIUM);
+try {
+    $avatarToken = (new MediaManager($db))->firstToken(MediaManager::TARGET_USER, $targetUserId, MediaManager::ROLE_AVATAR);
+    $myListings  = (new ServerDirectory($db))->listingsOf($targetUserId);
+} catch (PDOException $e) {
+    error_log(sprintf('[Boötes][Compte] Lecture des fiches d\'annuaire : %s', $e->getMessage()));
+}
 $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCOUNT_PREMIUM;
 $ramCeiling    = ServerManager::ramCeilingFor((string) $userProfile['type_compte'], (int) $userProfile['max_ram_allouable']);
 $maxServers    = ServerManager::maxServersFor((string) $userProfile['type_compte']);
@@ -568,7 +597,7 @@ $ramMax        = $isAdminView ? ServerManager::HOST_MAX_MC_RAM_MB : max(512, $ra
 <div class="account" data-tabs>
     <header class="account__header">
         <div class="account__identity">
-            <span class="avatar avatar--xl" aria-hidden="true"><?= Security::e(View::initials((string) $userProfile['pseudo'])) ?></span>
+            <?= View::avatar($avatarToken, (string) $userProfile['pseudo'], 'avatar--xl') ?>
             <div class="account__heading">
                 <p class="account__eyebrow"><?= $isAdminView ? 'Inspection administrateur' : 'Mon espace' ?></p>
                 <h1 class="account__title"><?= Security::e((string) $userProfile['pseudo']) ?></h1>
@@ -628,6 +657,7 @@ $ramMax        = $isAdminView ? ServerManager::HOST_MAX_MC_RAM_MB : max(512, $ra
 
     <nav class="tabs__list account__tabs" aria-label="Rubriques du compte" data-tablist>
         <a href="#section-serveurs" class="tabs__tab" data-tab><?= View::icon('server') ?> Serveurs <span class="tabs__count"><?= count($myServers) ?></span></a>
+        <a href="#section-annuaire" class="tabs__tab" data-tab><?= View::icon('earth') ?> Annuaire <span class="tabs__count"><?= count($myListings) ?></span></a>
         <a href="#section-creations" class="tabs__tab" data-tab><?= View::icon('blocks') ?> Créations <span class="tabs__count"><?= count($myCreations) ?></span></a>
         <a href="#section-amis" class="tabs__tab" data-tab><?= View::icon('users') ?> Amis
             <?php if (!empty($pendingReceived)): ?>
@@ -771,6 +801,49 @@ $ramMax        = $isAdminView ? ServerManager::HOST_MAX_MC_RAM_MB : max(512, $ra
                     ?>
                 <?php endforeach; ?>
             </div>
+        <?php endif; ?>
+    </section>
+
+    <!-- ANNUAIRE : serveurs externes référencés -->
+    <section id="section-annuaire" class="account__section account__section--directory" aria-labelledby="heading-annuaire">
+        <header class="account__section-header">
+            <div class="account__section-heading">
+                <h2 id="heading-annuaire" class="account__section-title">Mes fiches d'annuaire</h2>
+                <p class="account__section-desc">
+                    Serveurs hébergés ailleurs que vous avez référencés : <?= count($myListings) ?> / <?= $listingLimit ?> avec votre offre.
+                    Les serveurs hébergés sur Boötes apparaissent automatiquement dans l'annuaire.
+                </p>
+            </div>
+            <?php if (!$isAdminView && count($myListings) < $listingLimit): ?>
+                <a href="/user/annuaire-edition" class="account__btn account__btn--primary"><?= View::icon('plus') ?> Référencer un serveur</a>
+            <?php endif; ?>
+        </header>
+
+        <?php if ($myListings === []): ?>
+            <p class="account__empty">Aucun serveur référencé. Votre serveur est hébergé ailleurs ? Ajoutez-le à l'annuaire pour gagner en visibilité.</p>
+        <?php else: ?>
+            <ul class="listing-cards">
+                <?php foreach ($myListings as $listing): ?>
+                    <?php $listingAddress = ServerDirectory::formatAddress((string) $listing['adresse_ip'], (int) $listing['port']); ?>
+                    <li class="listing-cards__item">
+                        <div class="listing-cards__main">
+                            <a href="/serveur-public?id=<?= (int) $listing['id_serveur'] ?>" class="listing-cards__name"><?= Security::e((string) $listing['nom_serveur']) ?></a>
+                            <code class="listing-cards__ip"><?= Security::e($listingAddress) ?></code>
+                        </div>
+                        <div class="listing-cards__meta">
+                            <?php if (empty($listing['date_verification'])): ?>
+                                <span class="badge">Statut inconnu</span>
+                            <?php else: ?>
+                                <?= View::badge('statut_serveur', $listing['statut']) ?>
+                            <?php endif; ?>
+                            <?php if ((int) $listing['est_public'] !== 1): ?>
+                                <span class="badge badge--warning"><?= View::icon('eye-off') ?> Masqué</span>
+                            <?php endif; ?>
+                        </div>
+                        <a href="/user/annuaire-edition?id=<?= (int) $listing['id_serveur'] ?>" class="listing-cards__btn"><?= View::icon('pencil') ?> Modifier la fiche</a>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
         <?php endif; ?>
     </section>
 
@@ -1056,6 +1129,31 @@ $ramMax        = $isAdminView ? ServerManager::HOST_MAX_MC_RAM_MB : max(512, $ra
                 <p class="account__section-desc">Identifiants de connexion, mot de passe et données personnelles.</p>
             </div>
         </header>
+
+        <div class="avatar-editor">
+            <?= View::avatar($avatarToken, (string) $userProfile['pseudo'], 'avatar--xl') ?>
+            <div class="avatar-editor__body">
+                <h3 class="avatar-editor__title">Photo de profil</h3>
+                <p class="avatar-editor__hint">Affichée à côté de votre pseudo dans les listes, les fiches et les avis. Recadrée en carré, 5 Mo maximum.</p>
+                <div class="avatar-editor__forms">
+                    <form action="<?= Security::e($sectionUrl('section-profil')) ?>" method="post" enctype="multipart/form-data" class="avatar-editor__form">
+                        <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                        <input type="hidden" name="action" value="upload_avatar">
+                        <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
+                        <input type="file" name="image" accept="image/png,image/jpeg,image/webp,image/gif" required class="avatar-editor__file" aria-label="Choisir une photo de profil">
+                        <button type="submit" class="avatar-editor__btn"><?= View::icon('upload') ?> Envoyer</button>
+                    </form>
+                    <?php if ($avatarToken !== null): ?>
+                        <form action="<?= Security::e($sectionUrl('section-profil')) ?>" method="post" class="avatar-editor__form">
+                            <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                            <input type="hidden" name="action" value="delete_avatar">
+                            <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
+                            <button type="submit" class="avatar-editor__btn btn--danger" data-confirm="Retirer votre photo de profil ?"><?= View::icon('trash-2') ?> Retirer</button>
+                        </form>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
 
         <div class="account__profile-grid">
             <form action="<?= Security::e($sectionUrl('section-profil')) ?>" method="post" class="account-form account-form--identity">

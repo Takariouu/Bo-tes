@@ -145,12 +145,15 @@ $tests = [];
 
 $tests[] = ['Pages publiques accessibles sans erreur PHP', static function (TestContext $t): void {
     $client = $t->client();
-    foreach (['/', '/home', '/catalogue', '/catalogue?type=serveur', '/catalogue?type=mod', '/catalogue?type=modpack', '/cgu', '/offres',
-              '/auth', '/auth?mode=register', '/ressource-detail?id=1', '/serveur-public?id=1', '/serveur-public'] as $url) {
+    foreach (['/', '/home', '/catalogue', '/catalogue?type=mod', '/catalogue?type=modpack', '/catalogue?vue=grille', '/cgu', '/offres',
+              '/auth', '/auth?mode=register', '/ressource-detail?id=1', '/serveur-public?id=1', '/serveur-public',
+              '/serveurs', '/serveurs?tag=survie&en_ligne=1&vue=grille'] as $url) {
         $res = $client->get($url);
         check($res['status'] === 200, "$url doit répondre 200 (reçu {$res['status']})");
         check(str_contains($res['body'], '</html>'), "$url doit produire une page complète");
     }
+    $legacy = $client->get('/catalogue?type=serveur');
+    check($legacy['status'] === 302 && str_contains(implode(' ', $legacy['headers']['location'] ?? []), '/serveurs'), "L'ancien onglet Serveurs du catalogue doit rediriger vers l'annuaire");
     $errors = $t->drainPhpErrors();
     check($errors === [], "Erreurs PHP : " . implode(' | ', $errors));
 }];
@@ -585,6 +588,110 @@ $tests[] = ['Catalogue : filtre Modpacks fonctionnel', static function (TestCont
 }];
 
 // ---------------------------------------------------------------------------
+// Annuaire, médias et pages Premium
+// ---------------------------------------------------------------------------
+
+/** Image PNG unie générée par GD pour les tests de téléversement. */
+function make_png(int $width, int $height): string
+{
+    $img = imagecreatetruecolor($width, $height);
+    imagefill($img, 0, 0, imagecolorallocate($img, 40, 120, 200));
+    ob_start();
+    imagepng($img);
+
+    return (string) ob_get_clean();
+}
+
+$tests[] = ['Annuaire : serveur externe référencé, doublon, adresses internes, quota et panneau refusé', static function (TestContext $t): void {
+    $alice  = $t->login('alice');
+    $fields = [
+        'action' => 'save_listing', 'nom_serveur' => 'Royaume Test', 'adresse_ip' => 'Play.Royaume-Test.fr', 'port' => '25565',
+        'version_mc' => '1.21.4', 'mode_jeu' => 'SURVIE', 'resume' => 'Un serveur de test', 'description' => "Ligne 1\n\nLigne 2",
+        'etiquettes' => ['survie', 'pvp'], 'est_public' => '1',
+    ];
+    $res = $alice->submit('/user/annuaire-edition', $fields);
+    check($res['status'] === 302, "La création doit rediriger vers l'éditeur (reçu {$res['status']})");
+    $id = (int) $t->scalar("SELECT id_serveur FROM SERVEUR WHERE origine = 'EXTERNE' AND adresse_ip = 'play.royaume-test.fr'");
+    check($id > 0, 'La fiche externe doit être enregistrée avec une adresse normalisée');
+    check($t->scalar('SELECT etiquettes FROM SERVEUR WHERE id_serveur = ?', [$id]) === ',survie,pvp,', 'Les étiquettes doivent être enregistrées');
+    check(str_contains((string) $t->scalar('SELECT description FROM SERVEUR WHERE id_serveur = ?', [$id]), "\n\n"), 'Les paragraphes de la présentation doivent être conservés');
+
+    $alice->submit('/user/annuaire-edition', ['nom_serveur' => 'Doublon'] + $fields);
+    check((int) $t->scalar("SELECT COUNT(*) FROM SERVEUR WHERE LOWER(adresse_ip) = 'play.royaume-test.fr'") === 1, 'Un serveur déjà référencé ne doit pas être dupliqué');
+
+    foreach (['192.168.1.20', '127.0.0.1', '10.0.0.5:25565', 'localhost', 'play.bootes.local', 'srv.internal'] as $forbidden) {
+        $alice->submit('/user/annuaire-edition', ['adresse_ip' => $forbidden, 'nom_serveur' => 'Interne'] + $fields);
+    }
+    check((int) $t->scalar("SELECT COUNT(*) FROM SERVEUR WHERE nom_serveur = 'Interne'") === 0, 'Les adresses internes ou réservées doivent être refusées');
+
+    $alice->submit('/user/annuaire-edition', ['adresse_ip' => 'deux.royaume-test.fr', 'nom_serveur' => 'Deuxième'] + $fields);
+    $alice->submit('/user/annuaire-edition', ['adresse_ip' => 'trois.royaume-test.fr', 'nom_serveur' => 'Troisième'] + $fields);
+    check((int) $t->scalar("SELECT COUNT(*) FROM SERVEUR WHERE id_proprietaire = ? AND origine = 'EXTERNE'", [Fixtures::ALICE]) === 2, 'Un compte Standard est limité à 2 fiches externes');
+
+    check($alice->get('/serveur/dashboard?id=' . $id)['status'] === 404, "Une fiche externe n'a pas de panneau d'administration");
+    check($t->login('eve')->get('/user/annuaire-edition?id=' . $id)['status'] === 404, 'Un tiers ne doit pas pouvoir modifier la fiche');
+
+    $public = $t->client()->get('/serveurs?tag=pvp')['body'];
+    check(str_contains($public, 'Royaume Test') && str_contains($public, 'play.royaume-test.fr'), "La fiche doit apparaître dans l'annuaire filtré, avec son adresse");
+
+    $alice->submit('/user/annuaire-edition?id=' . $id, ['action' => 'delete_listing']);
+    check((int) $t->scalar('SELECT COUNT(*) FROM SERVEUR WHERE id_serveur = ?', [$id]) === 0, 'Le propriétaire doit pouvoir retirer sa fiche');
+    $errors = $t->drainPhpErrors();
+    check($errors === [], 'Erreurs PHP : ' . implode(' | ', $errors));
+}];
+
+$tests[] = ['Pages Premium : mise en page refusée en Standard, visible par tous, barre IP fixe', static function (TestContext $t): void {
+    $layoutPost = [
+        'action' => 'save_layout', 'server_id' => 1, 'op' => 'save', 'theme' => 'rubis',
+        'blocs'  => [['type' => 'annonce', 'texte' => 'Événement de test', 'ton' => 'evenement'], ['type' => 'presentation', 'colonnes' => 2]],
+    ];
+    $t->login('alice')->submit('/user/annuaire-edition?id=1', $layoutPost);
+    check((int) $t->scalar('SELECT COUNT(*) FROM PAGE_PERSONNALISEE') === 0, 'Un compte Standard ne doit pas pouvoir enregistrer de mise en page');
+
+    $t->db()->exec("UPDATE UTILISATEUR SET type_compte = 'PREMIUM' WHERE id_utilisateur = " . Fixtures::ALICE);
+    $t->login('alice')->submit('/user/annuaire-edition?id=1', $layoutPost);
+    check($t->scalar("SELECT theme FROM PAGE_PERSONNALISEE WHERE type_cible = 'SERVEUR' AND id_cible = 1") === 'rubis', 'Un compte Premium doit pouvoir enregistrer sa mise en page');
+
+    // Fin de l'abonnement : la page reste visible telle quelle par tous les visiteurs
+    $t->db()->exec("UPDATE UTILISATEUR SET type_compte = 'STANDARD' WHERE id_utilisateur = " . Fixtures::ALICE);
+    $page = $t->client()->get('/serveur-public?id=1')['body'];
+    check(str_contains($page, 'page-theme--rubis') && str_contains($page, 'Événement de test'), 'Tous les visiteurs voient la page personnalisée');
+    $bar = strpos($page, 'class="connect-bar ');
+    check(substr_count($page, 'class="connect-bar ') === 1 && $bar !== false && $bar < (int) strpos($page, 'class="page-blocks"'), 'La barre de connexion reste unique et placée avant les blocs');
+    check(preg_match('/class="connect-bar[^"]*page-theme/', $page) === 0, "Le thème ne s'applique pas à la barre de connexion");
+    check(str_contains($page, 'data-copy="play.bootes.local'), "Le bouton « Copier l'IP » doit porter l'adresse du serveur");
+}];
+
+$tests[] = ['Médias : image réencodée en WebP, faux fichiers refusés, galerie plafonnée', static function (TestContext $t): void {
+    $alice = $t->login('alice');
+    $alice->submit('/user/annuaire-edition?id=1', ['action' => 'upload_icon', 'server_id' => 1], ['image' => ['name' => 'logo.png', 'content' => make_png(300, 200)]]);
+    $token = (string) $t->scalar("SELECT jeton FROM MEDIA WHERE type_cible = 'SERVEUR' AND id_cible = 1 AND role = 'ICONE'");
+    check(preg_match('/^[a-f0-9]{32}$/', $token) === 1, "L'icône doit être enregistrée sous un jeton aléatoire");
+    check((int) $t->scalar('SELECT largeur FROM MEDIA WHERE jeton = ?', [$token]) === 200, "L'icône doit être recadrée en carré, sans agrandissement");
+
+    $res = $t->client()->get('/media?f=' . $token);
+    check($res['status'] === 200 && str_starts_with($res['body'], 'RIFF') && str_contains(header_value($res, 'Content-Type'), 'image/webp'), "L'image doit être servie en WebP");
+    check(str_contains(header_value($res, 'X-Content-Type-Options'), 'nosniff'), 'En-tête nosniff attendu');
+
+    $alice->submit('/user/annuaire-edition?id=1', ['action' => 'upload_icon', 'server_id' => 1], ['image' => ['name' => 'shell.png', 'content' => "<?php system('id'); ?>"]]);
+    $alice->submit('/user/annuaire-edition?id=1', ['action' => 'upload_icon', 'server_id' => 1], ['image' => ['name' => 'logo.svg', 'content' => '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>']]);
+    check($t->scalar("SELECT jeton FROM MEDIA WHERE role = 'ICONE'") === $token && (int) $t->scalar("SELECT COUNT(*) FROM MEDIA WHERE role = 'ICONE'") === 1, 'Les faux fichiers et le SVG doivent être refusés');
+
+    for ($i = 0; $i < 5; $i++) {
+        $alice->submit('/user/annuaire-edition?id=1', ['action' => 'upload_gallery', 'server_id' => 1, 'legende' => "Capture $i"], ['image' => ['name' => "capture$i.png", 'content' => make_png(640, 400)]]);
+    }
+    check((int) $t->scalar("SELECT COUNT(*) FROM MEDIA WHERE role = 'GALERIE'") === 4, "La galerie d'un compte Standard est plafonnée à 4 images");
+    $alice->submit('/user/annuaire-edition?id=1', ['action' => 'upload_banner', 'server_id' => 1], ['image' => ['name' => 'banniere.png', 'content' => make_png(1600, 400)]]);
+    check((int) $t->scalar("SELECT COUNT(*) FROM MEDIA WHERE role = 'BANNIERE'") === 0, 'La bannière est réservée aux comptes Premium');
+
+    $page = $t->client()->get('/serveur-public?id=1')['body'];
+    check(substr_count($page, 'data-gallery-item') === 4 && str_contains($page, 'Capture 0'), 'La galerie et ses légendes doivent apparaître sur la fiche');
+    check($t->client()->get('/media?f=' . str_repeat('0', 32))['status'] === 404 && $t->client()->get('/media?f=../../.env')['status'] === 404, 'Jeton inconnu ou chemin forgé : 404');
+    $errors = $t->drainPhpErrors();
+    check($errors === [], 'Erreurs PHP : ' . implode(' | ', $errors));
+}];
+
+// ---------------------------------------------------------------------------
 // Exécution
 // ---------------------------------------------------------------------------
 
@@ -698,6 +805,7 @@ $env = getenv();
 $env['BOOTES_TEST_DB']      = $ctx->dbFile;
 $env['BOOTES_STORAGE_PATH'] = $ctx->storageDir;
 $env['APP_ENV']             = 'test';
+$env['BOOTES_DIRECTORY_PING'] = '0';
 
 $server = new TestServer($root, $workDir, $env);
 $passed = 0;

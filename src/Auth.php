@@ -305,6 +305,14 @@ final class Auth
     }
 
     /**
+     * Vérifie si le compte connecté a l'offre Premium (synchronisée avec la base à chaque requête).
+     */
+    public static function isPremium(): bool
+    {
+        return self::isLogged() && strtoupper((string) ($_SESSION['user']['type_compte'] ?? '')) === self::ACCOUNT_PREMIUM;
+    }
+
+    /**
      * Vérifie si l'utilisateur dispose des privilèges Admin ou Super-Admin.
      */
     public static function isAdmin(): bool

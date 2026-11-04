@@ -444,6 +444,78 @@
         activate(Math.max(0, indexFromHash()), false);
     });
 
+    // ---------- Galeries d'images et visionneuse plein écran ----------
+    // Sans JavaScript, chaque vignette est un lien vers l'image en grand format.
+    var lightbox = document.querySelector('[data-lightbox]');
+    var lightboxItems = [];
+    var lightboxIndex = 0;
+
+    function showLightboxImage(index) {
+        var total = lightboxItems.length;
+        var item;
+        var thumb;
+
+        lightboxIndex = (index + total) % total;
+        item = lightboxItems[lightboxIndex];
+        thumb = item.querySelector('img');
+
+        lightbox.querySelector('[data-lightbox-image]').src = item.getAttribute('href');
+        lightbox.querySelector('[data-lightbox-image]').alt = thumb ? thumb.alt : '';
+        lightbox.querySelector('[data-lightbox-caption]').textContent = item.getAttribute('data-caption') || '';
+        lightbox.querySelector('[data-lightbox-counter]').textContent = (lightboxIndex + 1) + ' / ' + total;
+    }
+
+    if (lightbox && typeof lightbox.showModal === 'function') {
+        Array.prototype.forEach.call(lightbox.querySelectorAll('[data-lightbox-prev], [data-lightbox-next]'), function (button) {
+            button.addEventListener('click', function () {
+                showLightboxImage(lightboxIndex + (button.hasAttribute('data-lightbox-prev') ? -1 : 1));
+            });
+        });
+        lightbox.querySelector('[data-lightbox-close]').addEventListener('click', function () {
+            lightbox.close();
+        });
+        // Clic sur le fond sombre : fermeture
+        lightbox.addEventListener('click', function (event) {
+            if (event.target === lightbox) {
+                lightbox.close();
+            }
+        });
+        lightbox.addEventListener('keydown', function (event) {
+            if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                event.preventDefault();
+                showLightboxImage(lightboxIndex + (event.key === 'ArrowLeft' ? -1 : 1));
+            }
+        });
+        lightbox.addEventListener('close', function () {
+            lightbox.querySelector('[data-lightbox-image]').removeAttribute('src');
+        });
+    }
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-gallery]'), function (gallery) {
+        var track = gallery.querySelector('.gallery__track');
+        var items = Array.prototype.slice.call(gallery.querySelectorAll('[data-gallery-item]'));
+
+        Array.prototype.forEach.call(gallery.querySelectorAll('[data-gallery-prev], [data-gallery-next]'), function (button) {
+            button.addEventListener('click', function () {
+                var step = track.clientWidth * 0.85 * (button.hasAttribute('data-gallery-prev') ? -1 : 1);
+                track.scrollBy({ left: step, behavior: 'smooth' });
+            });
+        });
+
+        items.forEach(function (item, index) {
+            item.addEventListener('click', function (event) {
+                if (!lightbox || typeof lightbox.showModal !== 'function') {
+                    return;
+                }
+                event.preventDefault();
+                lightboxItems = items;
+                lightbox.classList.toggle('lightbox--single', items.length < 2);
+                showLightboxImage(index);
+                lightbox.showModal();
+            });
+        });
+    });
+
     // ---------- Envoi automatique d'un choix (tri du catalogue...) ----------
     // Sans JavaScript, le bouton « Appliquer » reste affiché et fait le même travail.
     Array.prototype.forEach.call(document.querySelectorAll('[data-autosubmit-fallback]'), function (button) {

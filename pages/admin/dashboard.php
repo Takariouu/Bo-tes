@@ -70,6 +70,7 @@ try {
             COALESCE(SUM(CASE WHEN statut != 'EN_LIGNE' THEN 1 ELSE 0 END), 0) AS offline_servers,
             COALESCE(SUM(CASE WHEN statut = 'EN_LIGNE' THEN joueurs_connectes ELSE 0 END), 0) AS online_players
         FROM SERVEUR
+        WHERE origine = 'HEBERGE'
     ");
     if ($srvStmt !== false) {
         $sRow = $srvStmt->fetch(PDO::FETCH_ASSOC);
@@ -122,6 +123,7 @@ try {
         SELECT s.id_serveur, s.nom_serveur, s.statut, s.ram_allouee, s.joueurs_connectes, s.slots_max, s.port, u.pseudo AS proprietaire
         FROM SERVEUR s
         INNER JOIN UTILISATEUR u ON u.id_utilisateur = s.id_proprietaire
+        WHERE s.origine = \'HEBERGE\'
         ORDER BY s.statut = \'EN_LIGNE\' DESC, s.ram_allouee DESC
         LIMIT 8
     ');

@@ -39,6 +39,35 @@ final class ResourceManager
         self::STATUS_SUSPENDU   => 'Suspendu (Modération)',
     ];
 
+    /** Catégories du catalogue, stockées en liste « ,technologie,magie, » (filtrable par LIKE). */
+    public const CATEGORIES = [
+        'aventure'       => 'Aventure',
+        'technologie'    => 'Technologie',
+        'magie'          => 'Magie',
+        'optimisation'   => 'Optimisation',
+        'utilitaire'     => 'Utilitaire',
+        'construction'   => 'Construction',
+        'carte'          => 'Carte et navigation',
+        'economie'       => 'Économie',
+        'administration' => 'Administration',
+        'mini-jeux'      => 'Mini-jeux',
+        'monde'          => 'Génération de monde',
+        'bibliotheque'   => 'Bibliothèque',
+    ];
+    public const MAX_CATEGORIES = 3;
+
+    /** Chargeurs proposés selon le type : mods (Fabric, Forge...) ou plugins (Paper, Spigot...). */
+    public const LOADERS = [
+        'FABRIC'   => 'Fabric',
+        'FORGE'    => 'Forge',
+        'NEOFORGE' => 'NeoForge',
+        'QUILT'    => 'Quilt',
+        'PAPER'    => 'Paper',
+        'SPIGOT'   => 'Spigot',
+        'PURPUR'   => 'Purpur',
+        'VELOCITY' => 'Velocity',
+    ];
+
     public const SUPPORTED_MC_VERSIONS = [
         '1.21.4',
         '1.21.1',
@@ -58,6 +87,30 @@ final class ResourceManager
     /**
      * Normalise le type de ressource (accepte MODPACK ou MOD_PACK) et vérifie sa validité.
      */
+    /** Enregistre les catégories (liste encodée par encodeCategories) et le chargeur d'une ressource. */
+    public function updateClassification(int $resourceId, string $categories, ?string $loader): void
+    {
+        $loader = $loader !== null && isset(self::LOADERS[$loader]) ? $loader : null;
+        $this->db->prepare('UPDATE RESSOURCE SET categories = :categories, chargeur = :loader WHERE id_ressource = :id')
+                 ->execute([':categories' => $categories, ':loader' => $loader, ':id' => $resourceId]);
+    }
+
+    /** @param array<int, mixed> $categories */
+    public static function encodeCategories(array $categories): string
+    {
+        $valid = array_values(array_intersect(array_keys(self::CATEGORIES), array_map('strval', $categories)));
+
+        return $valid === [] ? '' : ',' . implode(',', array_slice($valid, 0, self::MAX_CATEGORIES)) . ',';
+    }
+
+    /** @return array<int, string> */
+    public static function decodeCategories(?string $raw): array
+    {
+        $values = explode(',', (string) $raw);
+
+        return array_values(array_intersect(array_keys(self::CATEGORIES), $values));
+    }
+
     public static function normalizeType(string $rawType): string
     {
         $upper = strtoupper(trim($rawType));
@@ -125,7 +178,7 @@ final class ResourceManager
         $normalizedType = self::normalizeType($type);
         $cleanName      = Security::validateString($name, 3, 100);
         $cleanSummary   = Security::validateString($summary, 10, 255);
-        $cleanDesc      = Security::validateString($description, 20, 10000);
+        $cleanDesc      = Security::validateMultiline($description, 20, 10000);
         $cleanVersion   = in_array($mcVersion, self::SUPPORTED_MC_VERSIONS, true)
             ? $mcVersion
             : self::SUPPORTED_MC_VERSIONS[0];
@@ -201,7 +254,10 @@ final class ResourceManager
                 r.chemin_fichier,
                 r.statut_moderation,
                 r.date_publication,
+                r.categories,
+                r.chargeur,
                 u.pseudo AS auteur_pseudo,
+                u.type_compte AS auteur_offre,
                 COALESCE(AVG(ar.note), 0) AS note_moyenne,
                 COUNT(DISTINCT ar.id_utilisateur) AS nb_avis,
                 COUNT(DISTINCT fr.id_fichier) AS nb_versions
@@ -213,6 +269,9 @@ final class ResourceManager
             GROUP BY 
                 r.id_ressource,
                 r.id_auteur,
+                r.categories,
+                r.chargeur,
+                u.type_compte,
                 r.nom_ressource,
                 r.type_ressource,
                 r.version_compatible,
@@ -299,7 +358,7 @@ final class ResourceManager
         $normalizedType = self::normalizeType($type);
         $cleanName      = Security::validateString($name, 3, 100);
         $cleanSummary   = Security::validateString($summary, 10, 255);
-        $cleanDesc      = Security::validateString($description, 20, 10000);
+        $cleanDesc      = Security::validateMultiline($description, 20, 10000);
         $cleanVersion   = in_array($mcVersion, self::SUPPORTED_MC_VERSIONS, true)
             ? $mcVersion
             : self::SUPPORTED_MC_VERSIONS[0];
@@ -359,6 +418,9 @@ final class ResourceManager
         }
 
         $storedFiles    = $this->getStoredFilePaths($resourceId);
+        $mediaStmt      = $this->db->prepare("SELECT jeton FROM MEDIA WHERE type_cible = 'RESSOURCE' AND id_cible = :id");
+        $mediaStmt->execute([':id' => $resourceId]);
+        $mediaTokens    = array_map('strval', $mediaStmt->fetchAll(PDO::FETCH_COLUMN));
         $ownTransaction = !$this->db->inTransaction();
         if ($ownTransaction) {
             $this->db->beginTransaction();
@@ -377,6 +439,12 @@ final class ResourceManager
             $this->db->prepare("DELETE FROM SIGNALEMENT WHERE type_cible = 'RESSOURCE' AND id_cible = :id")
                      ->execute([':id' => $resourceId]);
 
+            // Images (icône, bannière, galerie) et mise en page personnalisée
+            foreach (['MEDIA', 'PAGE_PERSONNALISEE'] as $table) {
+                $this->db->prepare("DELETE FROM {$table} WHERE type_cible = 'RESSOURCE' AND id_cible = :id")
+                         ->execute([':id' => $resourceId]);
+            }
+
             $delStmt = $this->db->prepare('DELETE FROM RESSOURCE WHERE id_ressource = :id');
             $delStmt->execute([':id' => $resourceId]);
             $deleted = $delStmt->rowCount() > 0;
@@ -387,6 +455,7 @@ final class ResourceManager
 
             if ($purgeFiles && $deleted) {
                 $this->purgeStoredFiles($storedFiles);
+                MediaManager::deleteFiles($mediaTokens);
             }
 
             return $deleted;

@@ -10,6 +10,8 @@ use Bootes\Src\View;
  *
  * @var array{id: int|string, name: string, type: string, version: string, summary: ?string, author: string,
  *            downloads: int|string, rating: float|string} $card
+ * @var ?string $cardIcon   jeton de l'icône de la ressource
+ * @var ?string $cardAvatar jeton de la photo de l'auteur
  */
 $cardUrl    = '/ressource-detail?id=' . (int) $card['id'];
 $cardType   = strtoupper((string) $card['type']);
@@ -23,6 +25,7 @@ $cardRating = round((float) $card['rating'], 1);
 ?>
 <article class="resource-card resource-card--<?= $cardTone ?>">
     <header class="resource-card__top">
+        <?= View::tile($cardIcon ?? null, (string) $card['name'], 'tile--sm resource-card__icon') ?>
         <span class="type-chip type-chip--<?= $cardTone ?>"><?= View::icon($cardIcon) ?> <?= Security::e(View::label('type_ressource', $cardType)) ?></span>
         <span class="resource-card__version" title="Version de Minecraft">MC <?= Security::e((string) $card['version']) ?></span>
     </header>
@@ -30,7 +33,7 @@ $cardRating = round((float) $card['rating'], 1);
     <h3 class="resource-card__title">
         <a href="<?= Security::e($cardUrl) ?>" class="resource-card__link"><?= Security::e((string) $card['name']) ?></a>
     </h3>
-    <p class="resource-card__meta">par <?= Security::e((string) $card['author']) ?></p>
+    <p class="resource-card__meta"><?= View::avatar($cardAvatar ?? null, (string) $card['author'], 'avatar--xs') ?> <?= Security::e((string) $card['author']) ?></p>
     <p class="resource-card__description">
         <?= Security::e(mb_strimwidth((string) ($card['summary'] ?? ''), 0, 140, '…')) ?>
     </p>
