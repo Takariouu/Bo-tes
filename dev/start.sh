@@ -77,6 +77,7 @@ if [ "$TABLE_COUNT" = "0" ] || [ "${1:-}" = "--reset-db" ]; then
     echo "[dev] Import du schéma et des données de démonstration..."
     "${DBA[@]}" "$DB_NAME" <"$ROOT/dev/schema.sql"
     "${DBA[@]}" "$DB_NAME" <"$ROOT/dev/seed.sql"
+    SEED_DEMO=1
 fi
 
 # Migrations idempotentes (CREATE TABLE IF NOT EXISTS...) pour faire évoluer une base existante
@@ -84,6 +85,12 @@ for migration in "$ROOT"/dev/migrations/*.sql; do
     [ -f "$migration" ] && "${DBA[@]}" "$DB_NAME" <"$migration"
 done
 
+# Annuaire, images et pages Premium de démonstration (générés par GD, après une base neuve)
+if [ "${SEED_DEMO:-0}" = "1" ]; then
+    echo "[dev] Génération des images et pages de démonstration..."
+    php "$ROOT/dev/seed-demo.php"
+fi
+
 # 4. Serveur PHP intégré
 echo "[dev] Boötes est disponible sur http://localhost:$HTTP_PORT (Ctrl+C pour arrêter le serveur PHP)"
-exec php -S "127.0.0.1:$HTTP_PORT" -t "$ROOT" "$ROOT/dev/router.php"
+exec php -d upload_max_filesize=6M -d post_max_size=12M -S "127.0.0.1:$HTTP_PORT" -t "$ROOT" "$ROOT/dev/router.php"
