@@ -5,13 +5,20 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+# Une seule revue à la fois par Pull Request : un nouveau push annule la revue en cours
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   gemini-review:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 7
+
     # Autorisations nécessaires pour que Gemini puisse lire le code et écrire des commentaires
     permissions:
       contents: read
+      issues: write
       pull-requests: write
 
     steps:
@@ -19,10 +26,64 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. L'étape que vous devez intégrer
+      # 2. Revue de la Pull Request par Gemini, d'après l'exemple officiel
+      #    examples/workflows/pr-review de run-gemini-cli v0.1.22.
+      #    Prérequis : le secret GEMINI_API_KEY (Settings > Secrets and variables > Actions).
       - name: Run Gemini CLI
         uses: google-github-actions/run-gemini-cli@v0.1.22
         env:
+          # Lus par la commande /pr-code-review et par le serveur MCP GitHub
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          ADDITIONAL_CONTEXT: ''
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         with:
+          # La clé doit aussi passer par cette entrée : l'action remplace la
+          # variable d'environnement GEMINI_API_KEY par sa valeur.
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          github_pr_number: ${{ github.event.pull_request.number }}
+          # La commande /pr-code-review est fournie par cette extension
+          extensions: |
+            [
+              "https://github.com/gemini-cli-extensions/code-review"
+            ]
+          # Serveur MCP GitHub pour lire la PR et publier la revue ;
+          # commandes shell limitées à la lecture
+          settings: |-
+            {
+              "model": {
+                "maxSessionTurns": 25
+              },
+              "mcpServers": {
+                "github": {
+                  "command": "docker",
+                  "args": [
+                    "run",
+                    "-i",
+                    "--rm",
+                    "-e",
+                    "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "ghcr.io/github/github-mcp-server:v0.27.0"
+                  ],
+                  "includeTools": [
+                    "add_comment_to_pending_review",
+                    "pull_request_read",
+                    "pull_request_review_write"
+                  ],
+                  "env": {
+                    "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+                  }
+                }
+              },
+              "tools": {
+                "core": [
+                  "run_shell_command(cat)",
+                  "run_shell_command(echo)",
+                  "run_shell_command(grep)",
+                  "run_shell_command(head)",
+                  "run_shell_command(tail)"
+                ]
+              }
+            }
           prompt: '/pr-code-review'
