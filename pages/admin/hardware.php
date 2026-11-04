@@ -74,7 +74,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         } elseif ($action === 'force_kill_all_overloaded') {
             try {
-                $onlineStmt = $db->query("SELECT id_serveur FROM SERVEUR WHERE statut = 'EN_LIGNE'");
+                $onlineStmt = $db->query("SELECT id_serveur FROM SERVEUR WHERE statut = 'EN_LIGNE' AND origine = 'HEBERGE'");
                 $killedCount = 0;
                 if ($onlineStmt !== false) {
                     foreach ($onlineStmt->fetchAll(PDO::FETCH_COLUMN) as $sid) {
@@ -162,6 +162,7 @@ try {
             ) AS dernier_cpu_reel
         FROM SERVEUR s
         INNER JOIN UTILISATEUR u ON u.id_utilisateur = s.id_proprietaire
+        WHERE s.origine = 'HEBERGE'
         ORDER BY s.statut = 'EN_LIGNE' DESC, s.ram_allouee DESC
     ");
     if ($runStmt !== false) {

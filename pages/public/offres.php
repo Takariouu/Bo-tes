@@ -17,7 +17,10 @@ $comparison = [
     ['Carte 3D dans le navigateur', false, true],
     ['Console, journaux et statistiques', true, true],
     ['Co-administrateurs', true, true],
-    ['Annuaire public', true, 'Oui, mis en avant'],
+    ['Annuaire public', true, 'Oui, mis en avant (badge Premium)'],
+    ['Serveurs externes référencés dans l\'annuaire', '2 fiches', '10 fiches'],
+    ['Galerie d\'images par fiche', '4 images', '16 images'],
+    ['Page de présentation sur mesure (blocs, colonnes, thème, bannière)', false, true],
 ];
 ?>
 <section class="offers" aria-labelledby="offers-title">
@@ -91,6 +94,7 @@ $comparison = [
                 <li class="offer-card__feature"><?= View::icon('check') ?> <span>Carte 3D interactive dans le navigateur</span></li>
                 <li class="offer-card__feature"><?= View::icon('check') ?> <span>Statistiques détaillées (RAM, CPU, affluence)</span></li>
                 <li class="offer-card__feature"><?= View::icon('check') ?> <span>Mise en avant dans l'annuaire public</span></li>
+                <li class="offer-card__feature"><?= View::icon('check') ?> <span><strong>Pages sur mesure</strong> : blocs, thème, bannière, galerie de 16 images</span></li>
             </ul>
 
             <footer class="offer-card__footer">

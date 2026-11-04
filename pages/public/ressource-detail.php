@@ -5,6 +5,8 @@ declare(strict_types=1);
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Http;
+use Bootes\Src\MediaManager;
+use Bootes\Src\PageLayout;
 use Bootes\Src\RateLimiter;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
@@ -46,7 +48,10 @@ try {
             r.chemin_fichier,
             r.statut_moderation,
             r.date_publication,
-            u.pseudo AS auteur_pseudo
+            r.categories,
+            r.chargeur,
+            u.pseudo AS auteur_pseudo,
+            u.type_compte AS auteur_offre
         FROM RESSOURCE r
         INNER JOIN UTILISATEUR u ON u.id_utilisateur = r.id_auteur
         WHERE r.id_ressource = :id
@@ -205,7 +210,7 @@ $reviews = [];
 $averageRating = 0.0;
 try {
     $revStmt = $db->prepare('
-        SELECT ar.note, ar.commentaire, ar.date_avis, u.pseudo
+        SELECT ar.note, ar.commentaire, ar.date_avis, u.pseudo, u.id_utilisateur
         FROM AVIS_RESSOURCE ar
         INNER JOIN UTILISATEUR u ON u.id_utilisateur = ar.id_utilisateur
         WHERE ar.id_ressource = :id
@@ -230,7 +235,7 @@ if ($currentUserId !== null) {
             SELECT DISTINCT s.id_serveur, s.nom_serveur, s.version_mc
             FROM SERVEUR s
             LEFT JOIN ADMINISTRER_SERVEUR ads ON ads.id_serveur = s.id_serveur
-            WHERE s.id_proprietaire = :uid_owner OR ads.id_utilisateur = :uid_admin
+            WHERE s.origine = \'HEBERGE\' AND (s.id_proprietaire = :uid_owner OR ads.id_utilisateur = :uid_admin)
             ORDER BY s.nom_serveur ASC
         ');
         $srvStmt->execute([
@@ -261,6 +266,33 @@ foreach ($reviews as $rev) {
         $ratingCounts[$note]++;
     }
 }
+
+// Visuels (icône, bannière, galerie, photos) et mise en page choisie par l'auteur
+$iconToken    = null;
+$bannerToken  = null;
+$galleryMedia = [];
+$avatars      = [];
+$layout       = PageLayout::defaultLayout();
+try {
+    $media        = new MediaManager($db);
+    $iconToken    = $media->firstToken(MediaManager::TARGET_RESOURCE, $resourceId, MediaManager::ROLE_ICON);
+    $bannerToken  = $media->firstToken(MediaManager::TARGET_RESOURCE, $resourceId, MediaManager::ROLE_BANNER);
+    $galleryMedia = $media->forTarget(MediaManager::TARGET_RESOURCE, $resourceId, MediaManager::ROLE_GALLERY);
+    $avatars      = $media->tokensFor(MediaManager::TARGET_USER, array_merge([(int) $resource['id_auteur']], array_column($reviews, 'id_utilisateur')), MediaManager::ROLE_AVATAR);
+    $layout       = (new PageLayout($db))->load(MediaManager::TARGET_RESOURCE, $resourceId);
+} catch (PDOException $e) {
+    error_log(sprintf('[Boötes][RessourceDetail] Visuels : %s', $e->getMessage()));
+}
+
+$themeClass        = 'page-theme--' . $layout['theme'];
+$categories        = ResourceManager::decodeCategories($resource['categories'] ?? '');
+$authorPremium     = strtoupper((string) ($resource['auteur_offre'] ?? '')) === Auth::ACCOUNT_PREMIUM;
+$canEditPage       = $canModerate;
+$editUrl           = '/user/createur-edition?id=' . $resourceId;
+$presentationText  = (string) $resource['description'];
+$presentationTitle = 'Présentation';
+$galleryName       = (string) $resource['nom_ressource'];
+$pageTitle         = sprintf('%s — %s Minecraft — Boötes', (string) $resource['nom_ressource'], View::label('type_ressource', $typeKey));
 ?>
 <article class="resource-detail resource-detail--<?= $typeTone ?>" aria-labelledby="resource-main-title">
     <?php if ($feedbackMessage !== null): ?>
@@ -275,46 +307,72 @@ foreach ($reviews as $rev) {
         </div>
     <?php endif; ?>
 
-    <header class="resource-detail__header">
-        <div class="resource-detail__chips">
-            <span class="type-chip type-chip--<?= $typeTone ?>"><?= View::icon($typeIcon) ?> <?= Security::e(View::label('type_ressource', $typeKey)) ?></span>
-            <span class="badge"><?= View::icon('box') ?> Minecraft <?= Security::e((string) $resource['version_compatible']) ?></span>
-            <?php if (!$isAvailable): ?>
-                <?= View::badge('moderation', $resource['statut_moderation']) ?>
+    <header class="showcase-hero <?= Security::e($themeClass) ?><?= $bannerToken !== null ? ' showcase-hero--banner' : '' ?>">
+        <div class="showcase-hero__banner" aria-hidden="true">
+            <?php if ($bannerToken !== null): ?>
+                <img src="<?= Security::e(MediaManager::url($bannerToken)) ?>" alt="" class="showcase-hero__banner-img" width="1600" height="400">
             <?php endif; ?>
         </div>
-        <h1 id="resource-main-title" class="resource-detail__title"><?= Security::e((string) $resource['nom_ressource']) ?></h1>
-        <?php if (!empty($resource['resume'])): ?>
-            <p class="resource-detail__lead"><?= Security::e((string) $resource['resume']) ?></p>
-        <?php endif; ?>
-        <div class="resource-detail__byline">
-            <span class="avatar" aria-hidden="true"><?= Security::e(View::initials((string) $resource['auteur_pseudo'])) ?></span>
-            <span>
-                par <strong><?= Security::e((string) $resource['auteur_pseudo']) ?></strong>
-                &middot; publié le <time datetime="<?= Security::e((string) $resource['date_publication']) ?>"><?= Security::e(View::date((string) $resource['date_publication'])) ?></time>
-            </span>
-            <?php if (!empty($reviews)): ?>
-                <a href="#avis" class="resource-detail__rating">
-                    <?= View::stars($averageRating) ?>
-                    <?= View::number($averageRating, 1) ?> &middot; <?= count($reviews) ?> avis
-                </a>
-            <?php endif; ?>
+        <div class="showcase-hero__body">
+            <?= View::tile($iconToken, (string) $resource['nom_ressource'], 'tile--xl showcase-hero__icon') ?>
+            <div class="showcase-hero__identity">
+                <div class="showcase-hero__chips">
+                    <span class="type-chip type-chip--<?= $typeTone ?>"><?= View::icon($typeIcon) ?> <?= Security::e(View::label('type_ressource', $typeKey)) ?></span>
+                    <span class="badge"><?= View::icon('box') ?> Minecraft <?= Security::e((string) $resource['version_compatible']) ?></span>
+                    <?php if (!empty($resource['chargeur'])): ?>
+                        <span class="badge"><?= View::icon('layers') ?> <?= Security::e(View::label('loader', $resource['chargeur'])) ?></span>
+                    <?php endif; ?>
+                    <?php if ($authorPremium): ?>
+                        <span class="badge badge--premium"><?= View::icon('gem') ?> Créateur Premium</span>
+                    <?php endif; ?>
+                    <?php if (!$isAvailable): ?>
+                        <?= View::badge('moderation', $resource['statut_moderation']) ?>
+                    <?php endif; ?>
+                </div>
+                <h1 id="resource-main-title" class="showcase-hero__title"><?= Security::e((string) $resource['nom_ressource']) ?></h1>
+                <?php if (!empty($resource['resume'])): ?>
+                    <p class="showcase-hero__lead"><?= Security::e((string) $resource['resume']) ?></p>
+                <?php endif; ?>
+                <p class="showcase-hero__owner">
+                    <?= View::avatar($avatars[(int) $resource['id_auteur']] ?? null, (string) $resource['auteur_pseudo']) ?>
+                    <span>
+                        par <strong><?= Security::e((string) $resource['auteur_pseudo']) ?></strong>
+                        &middot; publié le <time datetime="<?= Security::e((string) $resource['date_publication']) ?>"><?= Security::e(View::date((string) $resource['date_publication'])) ?></time>
+                    </span>
+                    <?php if (!empty($reviews)): ?>
+                        <a href="#avis" class="resource-detail__rating">
+                            <?= View::stars($averageRating) ?>
+                            <?= View::number($averageRating, 1) ?> &middot; <?= count($reviews) ?> avis
+                        </a>
+                    <?php endif; ?>
+                </p>
+            </div>
+            <div class="showcase-hero__actions">
+                <?php if ($isAvailable && $latestFile !== null): ?>
+                    <form action="<?= Security::e($baseUrl) ?>" method="post" class="showcase-hero__inline">
+                        <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                        <input type="hidden" name="action" value="download">
+                        <button type="submit" class="showcase-hero__btn showcase-hero__btn--primary"><?= View::icon('download') ?> Télécharger</button>
+                    </form>
+                <?php endif; ?>
+                <?php if ($canEditPage): ?>
+                    <a href="<?= Security::e($editUrl) ?>" class="showcase-hero__btn"><?= View::icon('pencil') ?> Modifier la fiche</a>
+                <?php endif; ?>
+            </div>
         </div>
     </header>
 
     <div class="resource-detail__layout">
         <div class="resource-detail__main" data-tabs>
             <nav class="tabs__list" aria-label="Sections de la fiche" data-tablist>
-                <a href="#description" class="tabs__tab" data-tab><?= View::icon('file-text') ?> Description</a>
+                <a href="#description" class="tabs__tab" data-tab><?= View::icon('file-text') ?> Présentation</a>
                 <a href="#versions" class="tabs__tab" data-tab><?= View::icon('history') ?> Versions <span class="tabs__count"><?= count($versionsList) ?></span></a>
                 <a href="#avis" class="tabs__tab" data-tab><?= View::icon('star') ?> Avis <span class="tabs__count"><?= count($reviews) ?></span></a>
             </nav>
 
-            <section id="description" class="resource-detail__panel" aria-labelledby="desc-heading">
-                <h2 id="desc-heading" class="resource-detail__panel-title">Description</h2>
-                <div class="resource-detail__content">
-                    <p><?= nl2br(Security::e((string) $resource['description'])) ?></p>
-                </div>
+            <section id="description" class="resource-detail__panel <?= Security::e($themeClass) ?>" aria-labelledby="desc-heading">
+                <h2 id="desc-heading" class="visually-hidden">Présentation</h2>
+                <?php require __DIR__ . '/../../includes/fiche/blocks.php'; ?>
             </section>
 
             <section id="versions" class="resource-detail__panel" aria-labelledby="versions-heading">
@@ -406,7 +464,7 @@ foreach ($reviews as $rev) {
                         <?php foreach ($reviews as $rev): ?>
                             <article class="review-card">
                                 <header class="review-card__header">
-                                    <span class="avatar" aria-hidden="true"><?= Security::e(View::initials((string) $rev['pseudo'])) ?></span>
+                                    <?= View::avatar($avatars[(int) $rev['id_utilisateur']] ?? null, (string) $rev['pseudo']) ?>
                                     <strong class="review-card__author"><?= Security::e((string) $rev['pseudo']) ?></strong>
                                     <?= View::stars((int) $rev['note']) ?>
                                     <time class="review-card__date" datetime="<?= Security::e((string) $rev['date_avis']) ?>" title="<?= Security::e(View::date((string) $rev['date_avis'], true)) ?>">
@@ -469,6 +527,14 @@ foreach ($reviews as $rev) {
                     <dd><?= Security::e(View::label('type_ressource', $typeKey)) ?></dd>
                     <dt>Minecraft</dt>
                     <dd><?= Security::e((string) $resource['version_compatible']) ?></dd>
+                    <?php if (!empty($resource['chargeur'])): ?>
+                        <dt>Chargeur</dt>
+                        <dd><?= Security::e(View::label('loader', $resource['chargeur'])) ?></dd>
+                    <?php endif; ?>
+                    <?php if ($categories !== []): ?>
+                        <dt>Catégories</dt>
+                        <dd><?= Security::e(implode(', ', array_map(static fn (string $c): string => ResourceManager::CATEGORIES[$c], $categories))) ?></dd>
+                    <?php endif; ?>
                     <dt>Téléchargements</dt>
                     <dd><?= View::number((int) $resource['nb_telechargements']) ?></dd>
                     <dt>Note</dt>
@@ -534,4 +600,5 @@ foreach ($reviews as $rev) {
             </details>
         </div>
     </div>
+    <?php require __DIR__ . '/../../includes/fiche/lightbox.php'; ?>
 </article>

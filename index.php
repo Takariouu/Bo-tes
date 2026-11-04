@@ -20,6 +20,7 @@ use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Http;
 use Bootes\Src\Security;
+use Bootes\Src\ServerDirectory;
 use Bootes\Src\ServerManager;
 use Bootes\Src\View;
 
@@ -45,11 +46,14 @@ $routes = [
     'offres'                    => ['file' => '/pages/public/offres.php',                'access' => 'PUBLIC',      'label' => 'Offres d\'hébergement'],
     'ressource-detail'          => ['file' => '/pages/public/ressource-detail.php',      'access' => 'PUBLIC',      'label' => 'Fiche ressource'],
     'serveur-public'            => ['file' => '/pages/public/serveur-public.php',        'access' => 'PUBLIC',      'label' => 'Fiche serveur'],
+    'serveurs'                  => ['file' => '/pages/public/annuaire.php',              'access' => 'PUBLIC',      'label' => 'Annuaire des serveurs'],
+    'media'                     => ['file' => '/pages/public/media.php',                 'access' => 'PUBLIC',      'label' => 'Image'],
 
     // Routes espace utilisateur & créateur
     'user/compte'               => ['file' => '/pages/user/compte.php',                  'access' => 'USER',        'label' => 'Mon compte'],
     'user/createur-edition'     => ['file' => '/pages/user/createur-edition.php',        'access' => 'USER',        'label' => 'Atelier créateur'],
     'user/createur-statistiques'=> ['file' => '/pages/user/createur-statistiques.php',   'access' => 'USER',        'label' => 'Statistiques créateur'],
+    'user/annuaire-edition'     => ['file' => '/pages/user/annuaire-edition.php',        'access' => 'USER',        'label' => 'Fiche d\'annuaire'],
 
     // Routes de gestion d'un serveur Minecraft spécifique
     'serveur/dashboard'         => ['file' => '/pages/serveur/dashboard.php',            'access' => 'SERVER',      'label' => 'Tableau de bord'],
@@ -91,7 +95,7 @@ function defaultBreadcrumbs(string $route, string $label, ?array $server): array
     } elseif ($route === 'ressource-detail') {
         $trail[] = ['label' => 'Catalogue', 'url' => '/catalogue'];
     } elseif ($route === 'serveur-public') {
-        $trail[] = ['label' => 'Serveurs', 'url' => '/catalogue?type=serveur'];
+        $trail[] = ['label' => 'Annuaire des serveurs', 'url' => '/serveurs'];
     }
 
     $trail[] = ['label' => $label, 'url' => null];
@@ -293,6 +297,18 @@ switch ($requiredAccess) {
                 403,
                 'Accès refusé au serveur',
                 'Vous n\'êtes ni propriétaire, ni co-administrateur de ce serveur Minecraft, ni administrateur global.',
+                $currentRoute
+            );
+        }
+
+        // Une fiche externe de l'annuaire n'a pas d'instance hébergée, donc pas de panneau d'administration
+        $originStmt = $db->prepare('SELECT origine FROM SERVEUR WHERE id_serveur = :id LIMIT 1');
+        $originStmt->execute([':id' => $activeServerId]);
+        if ($originStmt->fetchColumn() === ServerDirectory::ORIGIN_EXTERNAL) {
+            renderHttpError(
+                404,
+                'Serveur non hébergé',
+                'Ce serveur est référencé dans l\'annuaire mais n\'est pas hébergé par Boötes : modifiez sa fiche depuis votre compte.',
                 $currentRoute
             );
         }

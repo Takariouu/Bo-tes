@@ -18,6 +18,7 @@ Au premier lancement, le script :
 |---------|------|
 | `dev/schema.sql` | Schéma MariaDB de la base `HEBERGEUR_MC` utilisée par le code (18 tables) |
 | `dev/seed.sql` | Données de démonstration : comptes, serveurs, ressources, avis, tickets... |
+| `dev/seed-demo.php` | Annuaire, images (dessinées en pixel art par GD), galeries et pages Premium de démonstration |
 | `dev/router.php` | Routeur du serveur PHP intégré, reproduit les règles du `.htaccess` |
 | `dev/start.sh` / `dev/stop.sh` | Démarrage et arrêt de l'environnement |
 
@@ -41,8 +42,29 @@ Mot de passe commun : `Bootes-Demo-2026` (connexion par pseudo ou e-mail).
 | Lyra | UTILISATEUR | Standard | Co-admin LECTURE, serveur privé « Lyra Aventure » |
 | Mizar | UTILISATEUR | Standard | Compte banni (connexion refusée) |
 
-Les sauvegardes et archives de ressources de démonstration n'existent qu'en base : leur téléchargement
-renvoie un message « fichier introuvable ». Celles créées depuis le site fonctionnent normalement.
+Les sauvegardes de démonstration n'existent qu'en base (téléchargement : « fichier introuvable ») ;
+`dev/seed-demo.php` crée en revanche de petites archives pour que le bouton « Télécharger » des
+ressources fonctionne.
+
+## Annuaire, galeries et pages Premium
+
+`dev/seed-demo.php` est lancé automatiquement après une base neuve (`bash dev/start.sh --reset-db`) ;
+il est idempotent et peut être relancé à la main : `php dev/seed-demo.php`.
+
+| Page | Adresse | Ce qu'elle montre |
+|------|---------|-------------------|
+| Annuaire | `/serveurs` | Serveurs hébergés et externes, filtres, vue liste ou grille, « Copier l'IP » |
+| Page Premium | Royaume de Pixelia (Vega_Builds) | Bannière, thème Améthyste, annonce, texte en 2 colonnes, points forts, galerie en grille, liens |
+| Page Premium | SkyForge Network (Arcturus), Arcturus Créatif (Vega_Builds) | Thèmes Océan et Émeraude, autres agencements |
+| Page Standard | Les Terres d'Eldoria (Nova) | Mise en page standard, galerie pleine (4 / 4) |
+| Ressource Premium | Stellar Tools (Vega_Builds) | Mod avec bannière, thème Ambre, galerie, installation, liens |
+| Ressource Standard | Nebula Economy (Orion_MC) | Plugin avec la mise en page standard |
+| Statut inconnu | Atelier Créatif Ludus (Lyra) | Fiche jamais vérifiée ; Lyra n'a pas de photo (initiales) |
+
+Pour comparer les droits : connectez-vous avec **Vega_Builds** (Premium) puis **Nova** (Standard) et
+ouvrez « Modifier la fiche » sur leur serveur. Le statut des serveurs externes est vérifié par
+`php cron/verifier-annuaire.php` (les adresses de démonstration sont fictives : elles passeront
+« hors ligne » si vous lancez la vérification).
 
 ## Régénérer les fichiers de marque et d'icônes
 

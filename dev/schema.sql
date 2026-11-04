@@ -10,7 +10,7 @@
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 
-DROP TABLE IF EXISTS FAVORI_SERVEUR, LOG_SYSTEME, MESSAGE_TICKET, TICKET_SUPPORT, RELATION_UTILISATEUR, SIGNALEMENT,
+DROP TABLE IF EXISTS PAGE_PERSONNALISEE, MEDIA, FAVORI_SERVEUR, LOG_SYSTEME, MESSAGE_TICKET, TICKET_SUPPORT, RELATION_UTILISATEUR, SIGNALEMENT,
     INSTALLER_RESSOURCE, AVIS_RESSOURCE, FICHIER_RESSOURCE, RESSOURCE, AVIS_SERVEUR, CONNEXION_JOUEUR,
     CONFIGURATION_MAP, HISTORIQUE_RESSOURCE, BACKUP, ETRE_LISTER, ADMINISTRER_SERVEUR, SERVEUR, UTILISATEUR;
 
@@ -36,11 +36,14 @@ CREATE TABLE UTILISATEUR (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------------------------
--- Serveurs Minecraft : statut (EN_LIGNE, HORS_LIGNE, DEMARRAGE, MAINTENANCE)
+-- Serveurs Minecraft : statut (EN_LIGNE, HORS_LIGNE, DEMARRAGE, MAINTENANCE) ;
+-- origine HEBERGE (instance Boötes) ou EXTERNE (fiche de l'annuaire public) ;
+-- etiquettes : liste « ,survie,pvp, » filtrable par LIKE.
 -- -----------------------------------------------------------------------------
 CREATE TABLE SERVEUR (
     id_serveur         INT UNSIGNED      NOT NULL AUTO_INCREMENT,
     id_proprietaire    INT UNSIGNED      NOT NULL,
+    origine            VARCHAR(10)       NOT NULL DEFAULT 'HEBERGE',
     nom_serveur        VARCHAR(64)       NOT NULL,
     adresse_ip         VARCHAR(255)      NOT NULL,
     port               SMALLINT UNSIGNED NOT NULL,
@@ -52,12 +55,18 @@ CREATE TABLE SERVEUR (
     slots_max          SMALLINT UNSIGNED NOT NULL DEFAULT 20,
     ram_allouee        INT UNSIGNED      NOT NULL DEFAULT 2048,
     description        TEXT              NULL,
+    resume             VARCHAR(160)      NULL,
+    etiquettes         VARCHAR(255)      NOT NULL DEFAULT '',
+    site_web           VARCHAR(255)      NULL,
+    discord            VARCHAR(255)      NULL,
+    date_verification  DATETIME          NULL,
     est_public         TINYINT(1)        NOT NULL DEFAULT 1,
     date_creation      DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id_serveur),
-    UNIQUE KEY uq_serveur_port (port),
+    UNIQUE KEY uq_serveur_adresse (adresse_ip, port),
     KEY i_serveur_proprietaire (id_proprietaire),
     KEY i_serveur_public_statut (est_public, statut),
+    KEY i_serveur_origine (origine, est_public),
     CONSTRAINT fk_serveur_proprietaire FOREIGN KEY (id_proprietaire) REFERENCES UTILISATEUR (id_utilisateur)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -162,7 +171,7 @@ CREATE TABLE IF NOT EXISTS FAVORI_SERVEUR (
 
 -- -----------------------------------------------------------------------------
 -- Ressources communautaires : type MOD, PLUGIN ou MOD_PACK,
--- modération EN_ATTENTE, VALIDE ou SUSPENDU.
+-- modération EN_ATTENTE, VALIDE ou SUSPENDU ; categories : liste « ,technologie,magie, ».
 -- -----------------------------------------------------------------------------
 CREATE TABLE RESSOURCE (
     id_ressource        INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -171,6 +180,8 @@ CREATE TABLE RESSOURCE (
     type_ressource      VARCHAR(16)  NOT NULL,
     version_compatible  VARCHAR(20)  NOT NULL,
     resume              VARCHAR(255) NOT NULL,
+    categories          VARCHAR(255) NOT NULL DEFAULT '',
+    chargeur            VARCHAR(20)  NULL,
     description         TEXT         NOT NULL,
     nb_telechargements  INT UNSIGNED NOT NULL DEFAULT 0,
     chemin_fichier      VARCHAR(512) NULL,
@@ -292,4 +303,43 @@ CREATE TABLE LOG_SYSTEME (
     KEY i_log_date (date_log),
     KEY i_log_utilisateur (id_utilisateur),
     CONSTRAINT fk_log_utilisateur FOREIGN KEY (id_utilisateur) REFERENCES UTILISATEUR (id_utilisateur) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -----------------------------------------------------------------------------
+-- Médias et pages personnalisées (annuaire, galeries, Premium)
+-- -----------------------------------------------------------------------------
+
+-- Images téléversées : type_cible SERVEUR, RESSOURCE ou UTILISATEUR ; role ICONE, AVATAR,
+-- BANNIERE ou GALERIE. Le jeton aléatoire sert de nom de fichier et d'URL (non devinable).
+CREATE TABLE IF NOT EXISTS MEDIA (
+    id_media         INT UNSIGNED      NOT NULL AUTO_INCREMENT,
+    id_proprietaire  INT UNSIGNED      NOT NULL,
+    type_cible       VARCHAR(16)       NOT NULL,
+    id_cible         INT UNSIGNED      NOT NULL,
+    role             VARCHAR(16)       NOT NULL,
+    jeton            CHAR(32)          NOT NULL,
+    largeur          SMALLINT UNSIGNED NOT NULL,
+    hauteur          SMALLINT UNSIGNED NOT NULL,
+    taille_octets    INT UNSIGNED      NOT NULL,
+    legende          VARCHAR(140)      NULL,
+    position         SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    date_ajout       DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id_media),
+    UNIQUE KEY uq_media_jeton (jeton),
+    KEY i_media_cible (type_cible, id_cible, role, position),
+    KEY i_media_proprietaire (id_proprietaire),
+    CONSTRAINT fk_media_proprietaire FOREIGN KEY (id_proprietaire) REFERENCES UTILISATEUR (id_utilisateur) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Mise en page d'une fiche (serveur ou ressource) : thème et blocs ordonnés (JSON validé par PageLayout)
+CREATE TABLE IF NOT EXISTS PAGE_PERSONNALISEE (
+    type_cible  VARCHAR(16)  NOT NULL,
+    id_cible    INT UNSIGNED NOT NULL,
+    theme       VARCHAR(20)  NOT NULL DEFAULT 'defaut',
+    blocs       TEXT         NOT NULL,
+    id_auteur   INT UNSIGNED NULL,
+    date_maj    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (type_cible, id_cible),
+    KEY i_page_auteur (id_auteur),
+    CONSTRAINT fk_page_auteur FOREIGN KEY (id_auteur) REFERENCES UTILISATEUR (id_utilisateur) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -50,6 +50,12 @@ final class UserManager
             }
         }
 
+        // Images à effacer après validation : toutes, sauf celles des ressources conservées (anonymisées)
+        $mediaSql  = 'SELECT jeton FROM MEDIA WHERE id_proprietaire = :uid' . ($deleteResources ? '' : " AND type_cible != 'RESSOURCE'");
+        $mediaStmt = $this->db->prepare($mediaSql);
+        $mediaStmt->execute([':uid' => $userId]);
+        $mediaTokens = array_map('strval', $mediaStmt->fetchAll(PDO::FETCH_COLUMN));
+
         $this->db->beginTransaction();
 
         try {
@@ -69,6 +75,8 @@ final class UserManager
                 }
             } else {
                 $this->resourceManager->anonymizeUserResources($userId, $anonymousId);
+                $this->db->prepare("UPDATE MEDIA SET id_proprietaire = :anon WHERE id_proprietaire = :uid AND type_cible = 'RESSOURCE'")
+                         ->execute([':anon' => $anonymousId, ':uid' => $userId]);
             }
 
             $statements = [
@@ -114,6 +122,7 @@ final class UserManager
             $this->serverManager->purgeServerFiles($serverId, $files);
         }
         $this->resourceManager->purgeStoredFiles($resourceFiles);
+        MediaManager::deleteFiles($mediaTokens);
 
         return true;
     }

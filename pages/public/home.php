@@ -4,62 +4,56 @@ declare(strict_types=1);
 
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
+use Bootes\Src\MediaManager;
 use Bootes\Src\Security;
+use Bootes\Src\ServerDirectory;
 use Bootes\Src\View;
 
 $db = $db ?? Database::getInstance();
 
-$popularServers = [];
+$popularServers  = [];
 $latestResources = [];
+$serverIcons     = [];
+$resourceIcons   = [];
+$authorAvatars   = [];
+$csrfToken       = Security::generateCsrfToken();
 
 try {
-    $serverStmt = $db->prepare('
-        SELECT 
-            s.id_serveur,
-            s.nom_serveur,
-            s.version_mc,
-            s.mode_jeu,
-            s.statut,
-            s.joueurs_connectes,
-            s.slots_max,
-            s.description,
-            u.pseudo AS proprietaire_pseudo,
-            COALESCE(AVG(a.note), 0) AS note_moyenne
-        FROM SERVEUR s
-        INNER JOIN UTILISATEUR u ON u.id_utilisateur = s.id_proprietaire
-        LEFT JOIN AVIS_SERVEUR a ON a.id_serveur = s.id_serveur
-        WHERE s.est_public = 1
-        GROUP BY s.id_serveur, s.nom_serveur, s.version_mc, s.mode_jeu, s.statut, s.joueurs_connectes, s.slots_max, s.description, u.pseudo
-        ORDER BY CASE s.statut WHEN \'EN_LIGNE\' THEN 0 WHEN \'DEMARRAGE\' THEN 1 WHEN \'MAINTENANCE\' THEN 2 ELSE 3 END,
-                 s.joueurs_connectes DESC, note_moyenne DESC
-        LIMIT 6
-    ');
-    $serverStmt->execute();
-    $popularServers = $serverStmt->fetchAll(PDO::FETCH_ASSOC);
+    // Classement de l'annuaire : en ligne d'abord, puis les plus peuplés (hébergés et externes)
+    $popularServers = (new ServerDirectory($db))->search(['tri' => 'populaires'], 5, 0)['items'];
 } catch (PDOException $e) {
     error_log(sprintf('[Boötes][Home] Erreur chargement serveurs populaires : %s', $e->getMessage()));
 }
 
 try {
     $resourceStmt = $db->prepare('
-        SELECT 
-            r.id_ressource,
-            r.nom_ressource,
-            r.type_ressource,
-            r.version_compatible,
-            r.resume,
-            r.nb_telechargements,
-            r.date_publication,
-            u.pseudo AS auteur_pseudo,
-            COALESCE((SELECT AVG(ar.note) FROM AVIS_RESSOURCE ar WHERE ar.id_ressource = r.id_ressource), 0) AS note_moyenne
+        SELECT
+            r.id_ressource AS id,
+            r.nom_ressource AS title,
+            UPPER(r.type_ressource) AS subtype,
+            r.version_compatible AS version,
+            r.resume AS summary,
+            r.categories,
+            r.chargeur,
+            r.nb_telechargements AS downloads,
+            r.id_auteur AS author_id,
+            u.pseudo AS author,
+            COALESCE((SELECT AVG(ar.note) FROM AVIS_RESSOURCE ar WHERE ar.id_ressource = r.id_ressource), 0) AS rating,
+            (SELECT COUNT(*) FROM FICHIER_RESSOURCE f WHERE f.id_ressource = r.id_ressource) AS versions,
+            COALESCE((SELECT MAX(f2.date_ajout) FROM FICHIER_RESSOURCE f2 WHERE f2.id_ressource = r.id_ressource), r.date_publication) AS updated_at
         FROM RESSOURCE r
         INNER JOIN UTILISATEUR u ON u.id_utilisateur = r.id_auteur
         WHERE r.statut_moderation = :statut
-        ORDER BY r.date_publication DESC
-        LIMIT 6
+        ORDER BY updated_at DESC, r.id_ressource DESC
+        LIMIT 5
     ');
     $resourceStmt->execute([':statut' => 'VALIDE']);
     $latestResources = $resourceStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $media         = new MediaManager($db);
+    $serverIcons   = $media->tokensFor(MediaManager::TARGET_SERVER, array_column($popularServers, 'id_serveur'), MediaManager::ROLE_ICON);
+    $resourceIcons = $media->tokensFor(MediaManager::TARGET_RESOURCE, array_column($latestResources, 'id'), MediaManager::ROLE_ICON);
+    $authorAvatars = $media->tokensFor(MediaManager::TARGET_USER, array_column($latestResources, 'author_id'), MediaManager::ROLE_AVATAR);
 } catch (PDOException $e) {
     error_log(sprintf('[Boötes][Home] Erreur chargement dernières ressources : %s', $e->getMessage()));
 }
@@ -174,31 +168,21 @@ require __DIR__ . '/../../includes/recherche.php';
     <header class="home-section__header">
         <div class="home-section__heading">
             <p class="home-section__eyebrow">Communauté</p>
-            <h2 id="popular-servers-title" class="home-section__title">Serveurs publics populaires</h2>
-            <p class="home-section__subtitle">Rejoignez les mondes actifs hébergés par la communauté Boötes.</p>
+            <h2 id="popular-servers-title" class="home-section__title">Serveurs populaires</h2>
+            <p class="home-section__subtitle">Le haut de l'annuaire : serveurs hébergés sur Boötes et serveurs référencés par la communauté.</p>
         </div>
-        <a href="/catalogue?type=serveur" class="home-section__more-link">Voir tous les serveurs <?= View::icon('arrow-right') ?></a>
+        <a href="/serveurs" class="home-section__more-link">Voir tous les serveurs <?= View::icon('arrow-right') ?></a>
     </header>
 
     <?php if (empty($popularServers)): ?>
         <p class="home-section__empty">Aucun serveur public n'est actuellement répertorié.</p>
     <?php else: ?>
-        <div class="card-grid">
-            <?php foreach ($popularServers as $server): ?>
+        <div class="server-list">
+            <?php foreach ($popularServers as $index => $row): ?>
                 <?php
-                $card = [
-                    'id'          => $server['id_serveur'],
-                    'name'        => $server['nom_serveur'],
-                    'version'     => $server['version_mc'],
-                    'mode'        => $server['mode_jeu'],
-                    'status'      => $server['statut'],
-                    'players'     => $server['joueurs_connectes'],
-                    'slots'       => $server['slots_max'],
-                    'description' => $server['description'],
-                    'owner'       => $server['proprietaire_pseudo'],
-                    'rating'      => $server['note_moyenne'],
-                ];
-                require __DIR__ . '/../../includes/cards/server-card.php';
+                $rowRank = $index + 1;
+                $rowIcon = $serverIcons[(int) $row['id_serveur']] ?? null;
+                require __DIR__ . '/../../includes/lists/server-row.php';
                 ?>
             <?php endforeach; ?>
         </div>
@@ -209,7 +193,7 @@ require __DIR__ . '/../../includes/recherche.php';
     <header class="home-section__header">
         <div class="home-section__heading">
             <p class="home-section__eyebrow">Catalogue</p>
-            <h2 id="latest-resources-title" class="home-section__title">Dernières créations</h2>
+            <h2 id="latest-resources-title" class="home-section__title">Créations mises à jour</h2>
             <p class="home-section__subtitle">Modpacks, mods et plugins vérifiés par la modération, prêts à installer.</p>
         </div>
         <a href="/catalogue" class="home-section__more-link">Parcourir le catalogue <?= View::icon('arrow-right') ?></a>
@@ -218,20 +202,12 @@ require __DIR__ . '/../../includes/recherche.php';
     <?php if (empty($latestResources)): ?>
         <p class="home-section__empty">Aucune ressource publiée pour le moment.</p>
     <?php else: ?>
-        <div class="card-grid">
-            <?php foreach ($latestResources as $resource): ?>
+        <div class="item-list">
+            <?php foreach ($latestResources as $row): ?>
                 <?php
-                $card = [
-                    'id'        => $resource['id_ressource'],
-                    'name'      => $resource['nom_ressource'],
-                    'type'      => $resource['type_ressource'],
-                    'version'   => $resource['version_compatible'],
-                    'summary'   => $resource['resume'],
-                    'author'    => $resource['auteur_pseudo'],
-                    'downloads' => $resource['nb_telechargements'],
-                    'rating'    => $resource['note_moyenne'],
-                ];
-                require __DIR__ . '/../../includes/cards/resource-card.php';
+                $rowIcon   = $resourceIcons[(int) $row['id']] ?? null;
+                $rowAvatar = $authorAvatars[(int) $row['author_id']] ?? null;
+                require __DIR__ . '/../../includes/lists/resource-row.php';
                 ?>
             <?php endforeach; ?>
         </div>

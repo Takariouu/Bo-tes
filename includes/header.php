@@ -15,13 +15,14 @@ $currentUser   = Auth::isLogged() && is_array($_SESSION['user'] ?? null) ? $_SES
 $csrfToken     = Security::generateCsrfToken();
 $theme         = View::theme();
 $themeLabel    = $theme === View::THEME_LIGHT ? 'Passer au thème sombre' : 'Passer au thème clair';
-$stylesheets   = ['variables', 'style', 'components', 'layout', 'terminal', 'pages'];
+$stylesheets   = ['variables', 'style', 'components', 'layout', 'terminal', 'pages', 'vitrine'];
 
 // Rubrique active de la navigation principale
 $catalogueType = strtolower(is_string($_GET['type'] ?? null) ? $_GET['type'] : '');
 $activeSection = match (true) {
     $currentRoute === 'home'                                                       => 'home',
     $currentRoute === 'serveur-public',
+    $currentRoute === 'serveurs',
     $currentRoute === 'catalogue' && in_array($catalogueType, ['serveur', 'serveurs'], true) => 'servers',
     $currentRoute === 'catalogue', $currentRoute === 'ressource-detail'            => 'catalogue',
     $currentRoute === 'offres'                                                     => 'offers',
@@ -31,7 +32,7 @@ $activeSection = match (true) {
 
 $mainNav = [
     ['id' => 'home',      'label' => 'Accueil',   'url' => '/home',                   'icon' => 'house'],
-    ['id' => 'servers',   'label' => 'Serveurs',  'url' => '/catalogue?type=serveur', 'icon' => 'earth'],
+    ['id' => 'servers',   'label' => 'Serveurs',  'url' => '/serveurs',               'icon' => 'earth'],
     ['id' => 'catalogue', 'label' => 'Catalogue', 'url' => '/catalogue',              'icon' => 'blocks'],
     $currentUser !== null
         ? ['id' => 'my-servers', 'label' => 'Mes serveurs', 'url' => '/user/compte#section-serveurs', 'icon' => 'server']
@@ -58,6 +59,15 @@ if ($currentUser !== null) {
 }
 
 $userPseudo = $currentUser !== null ? (string) $currentUser['pseudo'] : '';
+// Photo de profil du compte connecté (la base peut être indisponible sur une page d'erreur 503)
+$userAvatar = null;
+if (Auth::isLogged() && isset($db) && $db instanceof PDO) {
+    try {
+        $userAvatar = (new \Bootes\Src\MediaManager($db))->firstToken(\Bootes\Src\MediaManager::TARGET_USER, (int) Auth::getUserId(), \Bootes\Src\MediaManager::ROLE_AVATAR);
+    } catch (PDOException) {
+        $userAvatar = null;
+    }
+}
 $userRole   = $currentUser !== null ? (string) $currentUser['role'] : '';
 $userOffer  = $currentUser !== null ? (string) $currentUser['type_compte'] : '';
 $userRamGo  = $currentUser !== null ? (int) floor((int) $currentUser['max_ram'] / 1024) : 0;
@@ -113,13 +123,13 @@ $userRamGo  = $currentUser !== null ? (int) floor((int) $currentUser['max_ram'] 
                 <?php if ($currentUser !== null): ?>
                     <details class="user-menu" data-menu>
                         <summary class="user-menu__trigger" aria-label="Menu du compte <?= Security::e($userPseudo) ?>">
-                            <span class="avatar" aria-hidden="true"><?= Security::e(View::initials($userPseudo)) ?></span>
+                            <?= View::avatar($userAvatar, $userPseudo) ?>
                             <span class="user-menu__name"><?= Security::e($userPseudo) ?></span>
                             <?= View::icon('chevron-down', 'user-menu__chevron') ?>
                         </summary>
                         <div class="user-menu__panel">
                             <div class="user-menu__identity">
-                                <span class="avatar avatar--lg" aria-hidden="true"><?= Security::e(View::initials($userPseudo)) ?></span>
+                                <?= View::avatar($userAvatar, $userPseudo, 'avatar--lg') ?>
                                 <div class="user-menu__identity-text">
                                     <p class="user-menu__pseudo"><?= Security::e($userPseudo) ?></p>
                                     <p class="user-menu__badges">
@@ -179,7 +189,7 @@ $userRamGo  = $currentUser !== null ? (int) floor((int) $currentUser['max_ram'] 
                         <?php if ($currentUser !== null): ?>
                             <div class="mobile-nav__section">
                                 <div class="user-menu__identity">
-                                    <span class="avatar avatar--lg" aria-hidden="true"><?= Security::e(View::initials($userPseudo)) ?></span>
+                                    <?= View::avatar($userAvatar, $userPseudo, 'avatar--lg') ?>
                                     <div class="user-menu__identity-text">
                                         <p class="user-menu__pseudo"><?= Security::e($userPseudo) ?></p>
                                         <p class="user-menu__badges">

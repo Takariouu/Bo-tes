@@ -152,6 +152,43 @@ final class Security
     }
 
     /**
+     * Valide un texte sur plusieurs lignes (descriptions, blocs de page) : retours à la ligne conservés
+     * et normalisés en \n, autres caractères de contrôle supprimés, deux lignes vides consécutives au plus.
+     */
+    public static function validateMultiline(mixed $input, int $minLength = 0, int $maxLength = 5000): ?string
+    {
+        if (!is_string($input)) {
+            return null;
+        }
+
+        $text   = str_replace(["\r\n", "\r", "\t"], ["\n", "\n", ' '], $input);
+        $text   = (string) preg_replace('/[\x00-\x09\x0B-\x1F\x7F]/u', '', $text);
+        $text   = trim((string) preg_replace("/\n{3,}/", "\n\n", $text));
+        $length = mb_strlen($text, 'UTF-8');
+
+        return $length < $minLength || $length > $maxLength ? null : $text;
+    }
+
+    /**
+     * Valide une adresse web absolue (http ou https, sans identifiants intégrés ni espaces).
+     */
+    public static function validateWebUrl(mixed $input, int $maxLength = 255): ?string
+    {
+        $url = self::validateString($input, 8, $maxLength);
+        if ($url === null || preg_match('/\s/u', $url) === 1 || filter_var($url, FILTER_VALIDATE_URL) === false) {
+            return null;
+        }
+
+        $parts = parse_url($url);
+        if (!is_array($parts) || !in_array(strtolower((string) ($parts['scheme'] ?? '')), ['http', 'https'], true)
+            || ($parts['host'] ?? '') === '' || isset($parts['user']) || isset($parts['pass'])) {
+            return null;
+        }
+
+        return $url;
+    }
+
+    /**
      * Construit un motif LIKE « contient » dont les jokers % et _ saisis par l'utilisateur sont neutralisés.
      * À utiliser avec la clause ESCAPE '!' (portable MariaDB / SQLite).
      */

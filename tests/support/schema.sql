@@ -19,9 +19,10 @@ CREATE TABLE UTILISATEUR (
 CREATE TABLE SERVEUR (
     id_serveur         INTEGER PRIMARY KEY AUTOINCREMENT,
     id_proprietaire    INTEGER NOT NULL REFERENCES UTILISATEUR (id_utilisateur),
+    origine            TEXT NOT NULL DEFAULT 'HEBERGE',
     nom_serveur        TEXT NOT NULL,
-    adresse_ip         TEXT NOT NULL,
-    port               INTEGER NOT NULL UNIQUE,
+    adresse_ip         TEXT NOT NULL COLLATE NOCASE,
+    port               INTEGER NOT NULL,
     version_mc         TEXT NOT NULL,
     type_loader        TEXT DEFAULT 'VANILLA',
     mode_jeu           TEXT NOT NULL,
@@ -30,8 +31,14 @@ CREATE TABLE SERVEUR (
     slots_max          INTEGER NOT NULL DEFAULT 20,
     ram_allouee        INTEGER NOT NULL DEFAULT 2048,
     description        TEXT,
+    resume             TEXT,
+    etiquettes         TEXT NOT NULL DEFAULT '',
+    site_web           TEXT,
+    discord            TEXT,
+    date_verification  TEXT,
     est_public         INTEGER NOT NULL DEFAULT 1,
-    date_creation      TEXT NOT NULL
+    date_creation      TEXT NOT NULL,
+    UNIQUE (adresse_ip, port)
 );
 
 CREATE TABLE ADMINISTRER_SERVEUR (
@@ -114,6 +121,8 @@ CREATE TABLE RESSOURCE (
     type_ressource      TEXT NOT NULL,
     version_compatible  TEXT NOT NULL,
     resume              TEXT NOT NULL,
+    categories          TEXT NOT NULL DEFAULT '',
+    chargeur            TEXT,
     description         TEXT NOT NULL,
     nb_telechargements  INTEGER NOT NULL DEFAULT 0,
     chemin_fichier      TEXT,
@@ -194,4 +203,29 @@ CREATE TABLE LOG_SYSTEME (
     details         TEXT,
     adresse_ip      TEXT,
     date_log        TEXT NOT NULL
+);
+
+CREATE TABLE MEDIA (
+    id_media         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_proprietaire  INTEGER NOT NULL REFERENCES UTILISATEUR (id_utilisateur) ON DELETE CASCADE,
+    type_cible       TEXT NOT NULL,
+    id_cible         INTEGER NOT NULL,
+    role             TEXT NOT NULL,
+    jeton            TEXT NOT NULL UNIQUE,
+    largeur          INTEGER NOT NULL,
+    hauteur          INTEGER NOT NULL,
+    taille_octets    INTEGER NOT NULL,
+    legende          TEXT,
+    position         INTEGER NOT NULL DEFAULT 0,
+    date_ajout       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE PAGE_PERSONNALISEE (
+    type_cible  TEXT NOT NULL,
+    id_cible    INTEGER NOT NULL,
+    theme       TEXT NOT NULL DEFAULT 'defaut',
+    blocs       TEXT NOT NULL,
+    id_auteur   INTEGER REFERENCES UTILISATEUR (id_utilisateur) ON DELETE SET NULL,
+    date_maj    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (type_cible, id_cible)
 );

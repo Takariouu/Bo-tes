@@ -10,6 +10,7 @@ use Bootes\Src\View;
  *
  * @var array{id: int|string, name: string, version: string, mode: string, status: string, players: int|string,
  *            slots: int|string, description: ?string, owner: string, rating: float|string} $card
+ * @var ?string $cardIcon jeton du logo du serveur
  */
 $cardUrl     = '/serveur-public?id=' . (int) $card['id'];
 $cardSlots   = max(1, (int) $card['slots']);
@@ -18,6 +19,7 @@ $cardRating  = round((float) $card['rating'], 1);
 ?>
 <article class="server-card">
     <header class="server-card__top">
+        <?= View::tile($cardIcon ?? null, (string) $card['name'], 'tile--sm server-card__icon') ?>
         <?= View::badge('statut_serveur', $card['status']) ?>
         <span class="server-card__version" title="Version de Minecraft"><?= View::icon('box') ?> <?= Security::e((string) $card['version']) ?></span>
     </header>

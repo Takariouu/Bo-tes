@@ -7,6 +7,9 @@ require_once __DIR__ . '/../../src/ResourceManager.php';
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Http;
+use Bootes\Src\MediaManager;
+use Bootes\Src\PageEditor;
+use Bootes\Src\PageLayout;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
 use Bootes\Src\View;
@@ -54,11 +57,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $type       = ResourceManager::normalizeType($rawType);
                 $versionMc  = Security::validateString($_POST['version_compatible'] ?? '1.21.4', 3, 20) ?? '1.21.4';
                 $resume     = Security::validateString($_POST['resume'] ?? '', 10, 255) ?? '';
-                $desc       = Security::validateString($_POST['description'] ?? '', 20, 10000) ?? '';
+                $desc       = Security::validateMultiline($_POST['description'] ?? '', 20, 10000) ?? '';
+                $categories = ResourceManager::encodeCategories(is_array($_POST['categories'] ?? null) ? array_filter($_POST['categories'], 'is_string') : []);
+                $loader     = is_string($_POST['chargeur'] ?? null) && $_POST['chargeur'] !== '' ? $_POST['chargeur'] : null;
                 $modStatus  = Auth::isAdmin() ? (Security::validateString($_POST['statut_moderation'] ?? '', 3, 20)) : null;
 
                 if ($isEditMode && $resourceId !== null) {
                     if ($resourceManager->updateResource($resourceId, $nom, $type, $versionMc, $resume, $desc, $modStatus)) {
+                        $resourceManager->updateClassification($resourceId, $categories, $loader);
                         $feedbackMessage = 'Les informations de la ressource ont été mises à jour avec succès.';
                     } else {
                         $feedbackError = 'Veuillez vérifier que tous les champs respectent les longueurs requises.';
@@ -66,6 +72,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } else {
                     $newId = $resourceManager->createResource($currentUserId, $nom, $type, $versionMc, $resume, $desc);
                     if ($newId !== null) {
+                        $resourceManager->updateClassification($newId, $categories, $loader);
                         $resourceId = $newId;
                         $isEditMode = true;
                         $feedbackMessage = sprintf(
@@ -113,6 +120,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } else {
                     $feedbackError = 'Impossible de supprimer cette version de fichier.';
                 }
+            } elseif ($isEditMode && $resourceId !== null && in_array($action, PageEditor::ACTIONS, true)) {
+                // Visuels, galerie et mise en page : droits Premium évalués sur l'offre de l'auteur
+                $owner  = $resourceManager->getResourceById($resourceId);
+                $result = (new PageEditor(
+                    $db,
+                    MediaManager::TARGET_RESOURCE,
+                    $resourceId,
+                    (int) ($owner['id_auteur'] ?? $currentUserId),
+                    strtoupper((string) ($owner['auteur_offre'] ?? '')) === Auth::ACCOUNT_PREMIUM
+                ))->handle($action, $_POST, $_FILES);
+                if ($result !== null && $result['success']) {
+                    Http::redirect('/user/createur-edition?id=' . $resourceId . '#' . $result['anchor'], $result['message']);
+                }
+                $feedbackError = $result['message'] ?? 'Action inconnue.';
             } elseif ($action === 'delete_resource' && $isEditMode && $resourceId !== null) {
                 if ($resourceManager->deleteResource($resourceId)) {
                     Http::redirect('/user/compte#section-creations', 'La ressource et ses fichiers ont été supprimés.');
@@ -267,6 +288,32 @@ $actionUrl         = $isEditMode && $resourceId !== null
                 >
             </div>
 
+            <?php
+            $selectedCategories = ResourceManager::decodeCategories((string) ($resource['categories'] ?? ''));
+            $selectedLoader     = (string) ($resource['chargeur'] ?? '');
+            ?>
+            <fieldset class="creator-form__field tag-picker">
+                <legend class="creator-form__label">Catégories (<?= ResourceManager::MAX_CATEGORIES ?> au maximum, utilisées par les filtres du catalogue)</legend>
+                <div class="tag-picker__options">
+                    <?php foreach (ResourceManager::CATEGORIES as $slug => $label): ?>
+                        <label class="tag-picker__option">
+                            <input type="checkbox" name="categories[]" value="<?= Security::e($slug) ?>"<?= in_array($slug, $selectedCategories, true) ? ' checked' : '' ?> class="tag-picker__input">
+                            <span class="tag-picker__chip"><?= Security::e($label) ?></span>
+                        </label>
+                    <?php endforeach; ?>
+                </div>
+            </fieldset>
+
+            <div class="creator-form__field">
+                <label for="res-loader" class="creator-form__label">Chargeur ou plateforme</label>
+                <select id="res-loader" name="chargeur" class="creator-form__select">
+                    <option value="">Non précisé</option>
+                    <?php foreach (ResourceManager::LOADERS as $code => $label): ?>
+                        <option value="<?= Security::e($code) ?>"<?= $selectedLoader === $code ? ' selected' : '' ?>><?= Security::e($label) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
             <div class="creator-form__field">
                 <label for="res-description" class="creator-form__label">Description complète, prérequis et instructions d'installation</label>
                 <textarea
@@ -401,6 +448,21 @@ $actionUrl         = $isEditMode && $resourceId !== null
                 <?php endif; ?>
             </div>
         </section>
+
+        <?php
+        $media                  = new MediaManager($db);
+        $iconToken              = $media->firstToken(MediaManager::TARGET_RESOURCE, (int) $resource['id_ressource'], MediaManager::ROLE_ICON);
+        $bannerToken            = $media->firstToken(MediaManager::TARGET_RESOURCE, (int) $resource['id_ressource'], MediaManager::ROLE_BANNER);
+        $galleryMedia           = $media->forTarget(MediaManager::TARGET_RESOURCE, (int) $resource['id_ressource'], MediaManager::ROLE_GALLERY);
+        $layout                 = (new PageLayout($db))->load(MediaManager::TARGET_RESOURCE, (int) $resource['id_ressource']);
+        $editorActionUrl        = $actionUrl;
+        $editorHidden           = ['resource_id' => (int) $resource['id_ressource']];
+        $editorPremium          = strtoupper((string) ($resource['auteur_offre'] ?? '')) === Auth::ACCOUNT_PREMIUM;
+        $editorName             = (string) $resource['nom_ressource'];
+        $editorPublicUrl        = '/ressource-detail?id=' . (int) $resource['id_ressource'];
+        $editorPresentationNote = 'Le texte de présentation est la description complète saisie dans la section 1.';
+        require __DIR__ . '/../../includes/fiche/editor.php';
+        ?>
 
         <section class="creator-editor__section creator-editor__section--danger" aria-labelledby="danger-zone-title">
             <h2 id="danger-zone-title" class="creator-editor__section-title">3. Zone de suppression définitive</h2>
