@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace Bootes\Src;
 
-use Random\RandomException;
-
 final class Security
 {
     private const CSRF_SESSION_KEY = 'bootes_csrf_token';
@@ -33,6 +31,7 @@ final class Security
 
     /**
      * Génère ou récupère un jeton CSRF cryptographiquement sûr.
+     * Aucun repli prévisible : si le CSPRNG est indisponible, l'exception interrompt la requête.
      */
     public static function generateCsrfToken(): string
     {
@@ -46,20 +45,21 @@ final class Security
             empty($_SESSION[self::CSRF_SESSION_KEY]['expires_at']) ||
             $now >= (int) $_SESSION[self::CSRF_SESSION_KEY]['expires_at']
         ) {
-            try {
-                $token = bin2hex(random_bytes(32));
-            } catch (RandomException $e) {
-                error_log(sprintf('[Boötes][Security Error] Échec CSPRNG : %s', $e->getMessage()));
-                $token = hash('sha256', uniqid((string) mt_rand(), true));
-            }
-
             $_SESSION[self::CSRF_SESSION_KEY] = [
-                'token'      => $token,
+                'token'      => bin2hex(random_bytes(32)),
                 'expires_at' => $now + self::CSRF_TOKEN_TTL,
             ];
         }
 
         return (string) $_SESSION[self::CSRF_SESSION_KEY]['token'];
+    }
+
+    /**
+     * Invalide le jeton CSRF courant (changement de privilèges : connexion, déconnexion).
+     */
+    public static function rotateCsrfToken(): void
+    {
+        unset($_SESSION[self::CSRF_SESSION_KEY]);
     }
 
     /**
@@ -149,6 +149,15 @@ final class Security
         }
 
         return $cleaned;
+    }
+
+    /**
+     * Construit un motif LIKE « contient » dont les jokers % et _ saisis par l'utilisateur sont neutralisés.
+     * À utiliser avec la clause ESCAPE '!' (portable MariaDB / SQLite).
+     */
+    public static function likeContains(string $term): string
+    {
+        return '%' . strtr($term, ['!' => '!!', '%' => '!%', '_' => '!_']) . '%';
     }
 
     /**

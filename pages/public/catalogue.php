@@ -4,13 +4,14 @@ declare(strict_types=1);
 
 use Bootes\Config\Database;
 use Bootes\Src\Security;
+use Bootes\Src\View;
 
 $db = $db ?? Database::getInstance();
 
 $rawType       = strtolower(Security::validateString($_GET['type'] ?? 'all', 1, 20) ?? 'all');
 $searchQuery   = Security::validateString($_GET['q'] ?? '', 0, 100) ?? '';
 $versionFilter = Security::validateString($_GET['version'] ?? 'all', 1, 20) ?? 'all';
-$currentPage   = Security::validatePositiveInt($_GET['p'] ?? 1) ?? 1;
+$currentPage   = min(1000, Security::validatePositiveInt($_GET['p'] ?? 1) ?? 1);
 $perPage       = 12;
 $offset        = ($currentPage - 1) * $perPage;
 
@@ -29,6 +30,29 @@ $typeMap = [
 
 $normalizedType = $typeMap[$rawType] ?? 'all';
 
+// Tri : liste blanche des ordres proposés
+$sortOptions = ['populaires' => 'Les plus populaires', 'recents' => 'Les plus récents', 'notes' => 'Les mieux notés'];
+$sort        = Security::validateString($_GET['tri'] ?? 'populaires', 1, 20) ?? 'populaires';
+if (!array_key_exists($sort, $sortOptions)) {
+    $sort = 'populaires';
+}
+
+// Nombre d'éléments par onglet (serveurs publics et ressources validées)
+$tabCounts = ['all' => 0, 'serveur' => 0, 'mod' => 0, 'plugin' => 0, 'modpack' => 0];
+try {
+    $tabCounts['serveur'] = (int) $db->query('SELECT COUNT(*) FROM SERVEUR WHERE est_public = 1')->fetchColumn();
+    $typeRows = $db->query("SELECT UPPER(type_ressource) AS t, COUNT(*) AS n FROM RESSOURCE WHERE statut_moderation = 'VALIDE' GROUP BY UPPER(type_ressource)")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($typeRows as $row) {
+        $key = ['MOD' => 'mod', 'PLUGIN' => 'plugin', 'MOD_PACK' => 'modpack'][(string) $row['t']] ?? null;
+        if ($key !== null) {
+            $tabCounts[$key] = (int) $row['n'];
+            $tabCounts['all'] += (int) $row['n'];
+        }
+    }
+} catch (PDOException $e) {
+    error_log(sprintf('[Boötes][Catalogue] Erreur comptage des onglets : %s', $e->getMessage()));
+}
+
 $items      = [];
 $totalItems = 0;
 
@@ -38,8 +62,8 @@ try {
         $params       = [];
 
         if ($searchQuery !== '') {
-            $whereClauses[]   = '(s.nom_serveur LIKE :q_nom OR s.description LIKE :q_desc OR s.mode_jeu LIKE :q_mode)';
-            $likeQuery        = '%' . $searchQuery . '%';
+            $whereClauses[]   = '(s.nom_serveur LIKE :q_nom ESCAPE \'!\' OR s.description LIKE :q_desc ESCAPE \'!\' OR s.mode_jeu LIKE :q_mode ESCAPE \'!\')';
+            $likeQuery        = Security::likeContains($searchQuery);
             $params[':q_nom']  = $likeQuery;
             $params[':q_desc'] = $likeQuery;
             $params[':q_mode'] = $likeQuery;
@@ -50,7 +74,12 @@ try {
             $params[':version']    = $versionFilter;
         }
 
-        $whereSql = implode(' AND ', $whereClauses);
+        $whereSql    = implode(' AND ', $whereClauses);
+        $serverOrder = match ($sort) {
+            'recents' => 's.date_creation DESC',
+            'notes'   => 'rating DESC, s.joueurs_connectes DESC',
+            default   => "CASE s.statut WHEN 'EN_LIGNE' THEN 0 WHEN 'DEMARRAGE' THEN 1 WHEN 'MAINTENANCE' THEN 2 ELSE 3 END, s.joueurs_connectes DESC",
+        };
 
         $countStmt = $db->prepare("SELECT COUNT(*) FROM SERVEUR s WHERE {$whereSql}");
         $countStmt->execute($params);
@@ -74,7 +103,7 @@ try {
             LEFT JOIN AVIS_SERVEUR a ON a.id_serveur = s.id_serveur
             WHERE {$whereSql}
             GROUP BY s.id_serveur, s.nom_serveur, s.version_mc, s.mode_jeu, s.statut, s.joueurs_connectes, s.slots_max, s.description, u.pseudo
-            ORDER BY s.statut DESC, s.joueurs_connectes DESC
+            ORDER BY {$serverOrder}
             LIMIT :limit OFFSET :offset
         ";
 
@@ -90,14 +119,15 @@ try {
         $whereClauses = ["r.statut_moderation = 'VALIDE'"];
         $params       = [];
 
-        if (in_array($normalizedType, ['mod', 'plugin', 'modpack'], true)) {
+        $resourceTypeMap = ['mod' => 'MOD', 'plugin' => 'PLUGIN', 'modpack' => 'MOD_PACK'];
+        if (isset($resourceTypeMap[$normalizedType])) {
             $whereClauses[]          = 'UPPER(r.type_ressource) = :type_res';
-            $params[':type_res']     = strtoupper($normalizedType);
+            $params[':type_res']     = $resourceTypeMap[$normalizedType];
         }
 
         if ($searchQuery !== '') {
-            $whereClauses[]    = '(r.nom_ressource LIKE :q_nom OR r.resume LIKE :q_res OR r.description LIKE :q_desc)';
-            $likeQuery         = '%' . $searchQuery . '%';
+            $whereClauses[]    = '(r.nom_ressource LIKE :q_nom ESCAPE \'!\' OR r.resume LIKE :q_res ESCAPE \'!\' OR r.description LIKE :q_desc ESCAPE \'!\')';
+            $likeQuery         = Security::likeContains($searchQuery);
             $params[':q_nom']  = $likeQuery;
             $params[':q_res']  = $likeQuery;
             $params[':q_desc'] = $likeQuery;
@@ -108,7 +138,12 @@ try {
             $params[':version'] = $versionFilter;
         }
 
-        $whereSql = implode(' AND ', $whereClauses);
+        $whereSql      = implode(' AND ', $whereClauses);
+        $resourceOrder = match ($sort) {
+            'recents' => 'r.date_publication DESC',
+            'notes'   => 'rating DESC, r.nb_telechargements DESC',
+            default   => 'r.nb_telechargements DESC, r.date_publication DESC',
+        };
 
         $countStmt = $db->prepare("SELECT COUNT(*) FROM RESSOURCE r WHERE {$whereSql}");
         $countStmt->execute($params);
@@ -130,7 +165,7 @@ try {
             LEFT JOIN AVIS_RESSOURCE ar ON ar.id_ressource = r.id_ressource
             WHERE {$whereSql}
             GROUP BY r.id_ressource, r.nom_ressource, r.version_compatible, r.type_ressource, r.nb_telechargements, r.resume, u.pseudo
-            ORDER BY r.nb_telechargements DESC, r.date_publication DESC
+            ORDER BY {$resourceOrder}
             LIMIT :limit OFFSET :offset
         ";
 
@@ -149,124 +184,129 @@ try {
 
 $totalPages = max(1, (int) ceil($totalItems / $perPage));
 ?>
+<?php
+$tabs = [
+    'all'     => ['label' => 'Toutes les créations', 'icon' => 'blocks'],
+    'serveur' => ['label' => 'Serveurs publics',     'icon' => 'earth'],
+    'mod'     => ['label' => 'Mods',                 'icon' => 'puzzle'],
+    'plugin'  => ['label' => 'Plugins',              'icon' => 'plug'],
+    'modpack' => ['label' => 'Modpacks',             'icon' => 'boxes'],
+];
+$baseQuery = ['type' => $normalizedType, 'q' => $searchQuery, 'version' => $versionFilter, 'tri' => $sort];
+$pageUrl   = static fn (int $page): string => '/catalogue?' . http_build_query(['p' => $page] + $baseQuery);
+?>
 <section class="catalogue" aria-labelledby="catalogue-title">
     <header class="catalogue__header">
-        <h1 id="catalogue-title" class="catalogue__title">Catalogue Communautaire Boötes</h1>
+        <p class="catalogue__eyebrow">Catalogue communautaire</p>
+        <h1 id="catalogue-title" class="catalogue__title">
+            <?= $normalizedType === 'serveur' ? 'Serveurs publics' : 'Mods, plugins et modpacks' ?>
+        </h1>
         <p class="catalogue__subtitle">
-            Explorez les serveurs publics, mods, plugins et modpacks compatibles avec votre version de Minecraft.
+            <?= $normalizedType === 'serveur'
+                ? 'Rejoignez les mondes ouverts au public par la communauté Boötes.'
+                : 'Des créations vérifiées par la modération, à installer en un clic sur votre serveur.' ?>
         </p>
-
-        <nav class="catalogue__quick-filters" aria-label="Filtres rapides par type">
-            <ul class="catalogue__tabs">
-                <li class="catalogue__tab-item">
-                    <a href="/catalogue?type=all" class="catalogue__tab-link <?= $normalizedType === 'all' ? 'catalogue__tab-link--active' : '' ?>">Toutes les ressources</a>
-                </li>
-                <li class="catalogue__tab-item">
-                    <a href="/catalogue?type=serveur" class="catalogue__tab-link <?= $normalizedType === 'serveur' ? 'catalogue__tab-link--active' : '' ?>">Serveurs Publics</a>
-                </li>
-                <li class="catalogue__tab-item">
-                    <a href="/catalogue?type=mod" class="catalogue__tab-link <?= $normalizedType === 'mod' ? 'catalogue__tab-link--active' : '' ?>">Mods</a>
-                </li>
-                <li class="catalogue__tab-item">
-                    <a href="/catalogue?type=plugin" class="catalogue__tab-link <?= $normalizedType === 'plugin' ? 'catalogue__tab-link--active' : '' ?>">Plugins</a>
-                </li>
-                <li class="catalogue__tab-item">
-                    <a href="/catalogue?type=modpack" class="catalogue__tab-link <?= $normalizedType === 'modpack' ? 'catalogue__tab-link--active' : '' ?>">Modpacks</a>
-                </li>
-            </ul>
-        </nav>
     </header>
 
+    <nav class="catalogue__quick-filters" aria-label="Type de contenu">
+        <ul class="catalogue__tabs">
+            <?php foreach ($tabs as $tabKey => $tab): ?>
+                <li class="catalogue__tab-item">
+                    <a href="/catalogue?type=<?= Security::e($tabKey) ?>" class="catalogue__tab-link<?= $normalizedType === $tabKey ? ' catalogue__tab-link--active' : '' ?>"<?= $normalizedType === $tabKey ? ' aria-current="page"' : '' ?>>
+                        <?= View::icon($tab['icon']) ?>
+                        <?= Security::e($tab['label']) ?>
+                        <span class="catalogue__tab-count"><?= View::number($tabCounts[$tabKey]) ?></span>
+                    </a>
+                </li>
+            <?php endforeach; ?>
+        </ul>
+    </nav>
+
     <?php
-    $searchAction = '/catalogue';
+    $searchAction        = '/catalogue';
+    $searchShowCategories = false;
+    $searchHidden         = ['type' => $normalizedType, 'tri' => $sort];
     require __DIR__ . '/../../includes/recherche.php';
     ?>
 
-    <div class="catalogue__meta-bar" role="status">
-        <p class="catalogue__count">
-            <strong><?= $totalItems ?></strong> résultat<?= $totalItems > 1 ? 's' : '' ?> trouvé<?= $totalItems > 1 ? 's' : '' ?>
-            (Page <?= $currentPage ?> sur <?= $totalPages ?>)
+    <div class="catalogue__meta-bar">
+        <p class="catalogue__count" role="status">
+            <strong><?= View::number($totalItems) ?></strong> résultat<?= $totalItems > 1 ? 's' : '' ?>
+            <?php if ($totalPages > 1): ?>
+                &middot; page <?= $currentPage ?> sur <?= $totalPages ?>
+            <?php endif; ?>
         </p>
+        <form action="/catalogue" method="get" class="catalogue__sort">
+            <input type="hidden" name="type" value="<?= Security::e($normalizedType) ?>">
+            <input type="hidden" name="q" value="<?= Security::e($searchQuery) ?>">
+            <input type="hidden" name="version" value="<?= Security::e($versionFilter) ?>">
+            <label for="catalogue-sort" class="catalogue__sort-label"><?= View::icon('sliders-horizontal') ?> Trier</label>
+            <select id="catalogue-sort" name="tri" class="catalogue__sort-select" data-autosubmit>
+                <?php foreach ($sortOptions as $sortKey => $sortLabel): ?>
+                    <option value="<?= Security::e($sortKey) ?>"<?= $sort === $sortKey ? ' selected' : '' ?>><?= Security::e($sortLabel) ?></option>
+                <?php endforeach; ?>
+            </select>
+            <button type="submit" class="catalogue__sort-btn" data-autosubmit-fallback>Appliquer</button>
+        </form>
     </div>
 
     <?php if (empty($items)): ?>
-        <article class="catalogue__empty">
-            <h2 class="catalogue__empty-title">Aucun résultat ne correspond à vos critères</h2>
+        <div class="catalogue__empty">
+            <span class="catalogue__empty-icon" aria-hidden="true"><?= View::icon('telescope') ?></span>
+            <h2 class="catalogue__empty-title">Aucun résultat dans cette région du ciel</h2>
             <p class="catalogue__empty-text">
                 Essayez d'élargir votre recherche ou de réinitialiser les filtres de version et de catégorie.
             </p>
-            <a href="/catalogue" class="catalogue__reset-btn">Afficher tout le catalogue</a>
-        </article>
+            <a href="/catalogue" class="catalogue__reset-btn"><?= View::icon('refresh-cw') ?> Afficher tout le catalogue</a>
+        </div>
     <?php else: ?>
-        <div class="catalogue__grid">
+        <div class="card-grid catalogue__results">
             <?php foreach ($items as $item): ?>
                 <?php
-                $itemId      = (int) $item['id'];
-                $isServer    = ($item['item_category'] === 'SERVEUR');
-                $detailUrl   = $isServer ? "/serveur-public?id={$itemId}" : "/ressource-detail?id={$itemId}";
-                $ratingValue = round((float) $item['rating'], 1);
+                if ($item['item_category'] === 'SERVEUR') {
+                    $card = [
+                        'id'          => $item['id'],
+                        'name'        => $item['title'],
+                        'version'     => $item['version'],
+                        'mode'        => $item['subtype'],
+                        'status'      => $item['status'],
+                        'players'     => $item['joueurs_connectes'],
+                        'slots'       => $item['slots_max'],
+                        'description' => $item['summary'],
+                        'owner'       => $item['author'],
+                        'rating'      => $item['rating'],
+                    ];
+                    require __DIR__ . '/../../includes/cards/server-card.php';
+                } else {
+                    $card = [
+                        'id'        => $item['id'],
+                        'name'      => $item['title'],
+                        'type'      => $item['subtype'],
+                        'version'   => $item['version'],
+                        'summary'   => $item['summary'],
+                        'author'    => $item['author'],
+                        'downloads' => $item['downloads'],
+                        'rating'    => $item['rating'],
+                    ];
+                    require __DIR__ . '/../../includes/cards/resource-card.php';
+                }
                 ?>
-                <article class="catalogue-card <?= $isServer ? 'catalogue-card--server' : 'catalogue-card--resource' ?>">
-                    <header class="catalogue-card__header">
-                        <span class="catalogue-card__badge"><?= Security::e((string) $item['subtype']) ?></span>
-                        <span class="catalogue-card__version">MC <?= Security::e((string) $item['version']) ?></span>
-                    </header>
-
-                    <div class="catalogue-card__body">
-                        <h2 class="catalogue-card__title">
-                            <a href="<?= Security::e($detailUrl) ?>" class="catalogue-card__link">
-                                <?= Security::e((string) $item['title']) ?>
-                            </a>
-                        </h2>
-                        <p class="catalogue-card__author">
-                            Par <strong><?= Security::e((string) $item['author']) ?></strong>
-                        </p>
-                        <p class="catalogue-card__summary">
-                            <?= Security::e(mb_strimwidth((string) ($item['summary'] ?? ''), 0, 150, '...')) ?>
-                        </p>
-                    </div>
-
-                    <footer class="catalogue-card__footer">
-                        <?php if ($isServer): ?>
-                            <span class="catalogue-card__stat">
-                                <?= Security::e((string) $item['status']) ?> &bull;
-                                <?= (int) $item['joueurs_connectes'] ?>/<?= (int) $item['slots_max'] ?> joueurs
-                            </span>
-                        <?php else: ?>
-                            <span class="catalogue-card__stat">
-                                <?= (int) $item['downloads'] ?> téléchargements
-                            </span>
-                        <?php endif; ?>
-
-                        <span class="catalogue-card__rating">Note : <?= Security::e((string) $ratingValue) ?>/5</span>
-                        <a href="<?= Security::e($detailUrl) ?>" class="catalogue-card__btn">Consulter</a>
-                    </footer>
-                </article>
             <?php endforeach; ?>
         </div>
 
         <?php if ($totalPages > 1): ?>
             <nav class="pagination" aria-label="Pagination du catalogue">
-                <ul class="pagination__list">
-                    <?php for ($p = 1; $p <= $totalPages; $p++): ?>
-                        <?php
-                        $queryParams = [
-                            'type'    => $normalizedType,
-                            'q'       => $searchQuery,
-                            'version' => $versionFilter,
-                            'p'       => $p,
-                        ];
-                        $pageUrl = '/catalogue?' . http_build_query($queryParams);
-                        ?>
-                        <li class="pagination__item">
-                            <a href="<?= Security::e($pageUrl) ?>"
-                               class="pagination__link <?= $p === $currentPage ? 'pagination__link--active' : '' ?>"
-                               <?= $p === $currentPage ? 'aria-current="page"' : '' ?>>
-                                <?= $p ?>
-                            </a>
-                        </li>
-                    <?php endfor; ?>
-                </ul>
+                <?php if ($currentPage > 1): ?>
+                    <a href="<?= Security::e($pageUrl($currentPage - 1)) ?>" class="pagination__link" aria-label="Page précédente"><?= View::icon('chevron-left') ?></a>
+                <?php endif; ?>
+                <?php for ($p = 1; $p <= $totalPages; $p++): ?>
+                    <a href="<?= Security::e($pageUrl($p)) ?>"
+                       class="pagination__link<?= $p === $currentPage ? ' pagination__link--active' : '' ?>"
+                       <?= $p === $currentPage ? 'aria-current="page"' : '' ?>><?= $p ?></a>
+                <?php endfor; ?>
+                <?php if ($currentPage < $totalPages): ?>
+                    <a href="<?= Security::e($pageUrl($currentPage + 1)) ?>" class="pagination__link" aria-label="Page suivante"><?= View::icon('chevron-right') ?></a>
+                <?php endif; ?>
             </nav>
         <?php endif; ?>
     <?php endif; ?>

@@ -1,0 +1,196 @@
+/* =============================================================================
+   Boötes — jetons de design
+   Thème « ciel nocturne » par défaut (logo #e2e8f0 sur bleu nuit), thème clair
+   via <html data-theme="light">. Contrastes texte / fond conformes WCAG AA.
+
+   Couches CSS, de la plus générique à la plus spécifique : une règle d'une
+   couche postérieure l'emporte toujours, quelle que soit sa spécificité.
+   ============================================================================= */
+@layer tokens, base, components, layout, pages;
+
+/* Polices auto-hébergées (licence SIL OFL 1.1, voir assets/fonts/LICENSE-*.txt) */
+@font-face {
+    font-family: "Archivo";
+    src: url("../fonts/archivo-latin-variable.woff2") format("woff2");
+    font-weight: 100 900;
+    font-stretch: 62% 125%;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "Inter";
+    src: url("../fonts/inter-latin-variable.woff2") format("woff2");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "JetBrains Mono";
+    src: url("../fonts/jetbrains-mono-latin-variable.woff2") format("woff2");
+    font-weight: 100 800;
+    font-style: normal;
+    font-display: swap;
+}
+
+@layer tokens {
+    :root {
+        color-scheme: dark;
+
+        /* Fond : bleu nuit profond, halos de nébuleuse et d'Arcturus, étoiles */
+        --bg: #060a14;
+        --bg-glow-1: rgba(108, 125, 255, 0.16);
+        --bg-glow-2: rgba(245, 164, 66, 0.09);
+        --stars-image: url("/assets/img/stars-small.svg");
+        --stars-bright-image: url("/assets/img/stars-bright.svg");
+        --stars-opacity: 1;
+
+        /* Surfaces */
+        --surface: rgba(13, 20, 38, 0.86);
+        --surface-solid: #0d1426;
+        --surface-2: #131c33;
+        --surface-3: #1a2440;
+        --surface-hover: #18223d;
+        --surface-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0) 45%);
+        --field: #080e1c;
+        --header-bg: rgba(6, 10, 20, 0.74);
+        --border: rgba(148, 163, 184, 0.14);
+        --border-strong: rgba(148, 163, 184, 0.26);
+
+        /* Texte : la couleur principale est celle du logo */
+        --text: #e2e8f0;
+        --text-muted: #9aa7bb;
+        --text-faint: #818ea2;
+        --heading: #f4f7fb;
+        --logo: #e2e8f0;
+
+        /* Accent « Arcturus » (étoile orangée du Bouvier) : actions principales */
+        --accent: #f5a442;
+        --accent-ink: #1d1206;
+        --accent-text: #f7b15e;
+        --accent-soft: rgba(245, 164, 66, 0.14);
+        --accent-border: rgba(245, 164, 66, 0.45);
+        --accent-glow: rgba(245, 164, 66, 0.32);
+        --accent-gradient: linear-gradient(135deg, #ffc073 0%, #f5a442 48%, #e8892b 100%);
+
+        /* Nébuleuse indigo : liens, focus, informations */
+        --nebula: #93a4ff;
+        --nebula-strong: #b4c0ff;
+        --nebula-soft: rgba(147, 164, 255, 0.14);
+
+        /* États */
+        --success: #4ade80;
+        --success-soft: rgba(74, 222, 128, 0.12);
+        --warning: #fcd34d;
+        --warning-soft: rgba(252, 211, 77, 0.12);
+        --danger: #f87171;
+        --danger-soft: rgba(248, 113, 113, 0.12);
+        --danger-solid: #dc2626;
+        --maintenance: #c4a5ff;
+        --maintenance-soft: rgba(196, 165, 255, 0.14);
+
+        /* Console et journaux : toujours sombres, quel que soit le thème */
+        --terminal-bg: #03060d;
+        --terminal-header: #0a1020;
+        --terminal-border: rgba(148, 163, 184, 0.18);
+        --terminal-text: #d6e4f0;
+        --terminal-muted: #818ea2;
+        --terminal-prompt: #f7b15e;
+
+        /* Typographie */
+        --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --font-display: "Archivo", "Inter", system-ui, sans-serif;
+        --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+        --text-xs: 0.75rem;
+        --text-sm: 0.875rem;
+        --text-base: 1rem;
+        --text-lg: 1.125rem;
+        --text-xl: 1.3rem;
+        --text-2xl: 1.6rem;
+        --text-3xl: clamp(1.75rem, 1.35rem + 1.6vw, 2.35rem);
+        --text-4xl: clamp(2.4rem, 1.5rem + 3.6vw, 3.75rem);
+        --leading: 1.6;
+        --leading-tight: 1.2;
+
+        /* Espacements (base 4 px) */
+        --space-1: 0.25rem;
+        --space-2: 0.5rem;
+        --space-3: 0.75rem;
+        --space-4: 1rem;
+        --space-5: 1.5rem;
+        --space-6: 2rem;
+        --space-7: 3rem;
+        --space-8: 4rem;
+
+        /* Formes, ombres et mouvements */
+        --radius-sm: 6px;
+        --radius: 10px;
+        --radius-lg: 16px;
+        --radius-full: 999px;
+        --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+        --shadow: 0 12px 32px -16px rgba(0, 0, 0, 0.75), 0 2px 8px -2px rgba(0, 0, 0, 0.35);
+        --shadow-lg: 0 32px 64px -28px rgba(0, 0, 0, 0.85);
+        --ring: 0 0 0 3px rgba(147, 164, 255, 0.4);
+        --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+        --duration-fast: 120ms;
+        --duration: 200ms;
+        --duration-slow: 360ms;
+
+        /* Gabarit */
+        --header-height: 4rem;
+        --content-max: 1320px;
+        --sidebar-width: 16.5rem;
+    }
+
+    :root[data-theme="light"] {
+        color-scheme: light;
+
+        --bg: #eef2f8;
+        --bg-glow-1: rgba(99, 112, 230, 0.12);
+        --bg-glow-2: rgba(245, 164, 66, 0.12);
+        --stars-image: none;
+        --stars-bright-image: none;
+        --stars-opacity: 0;
+
+        --surface: rgba(255, 255, 255, 0.92);
+        --surface-solid: #ffffff;
+        --surface-2: #f4f6fb;
+        --surface-3: #e9eef6;
+        --surface-hover: #eef2f9;
+        --surface-sheen: none;
+        --field: #ffffff;
+        --header-bg: rgba(255, 255, 255, 0.8);
+        --border: #dde4ee;
+        --border-strong: #c5cfdd;
+
+        --text: #1e293b;
+        --text-muted: #556378;
+        --text-faint: #5f6b7c;
+        --heading: #0b1222;
+        --logo: #0f172a;
+
+        --accent-text: #a7530b;
+        --accent-soft: rgba(245, 164, 66, 0.16);
+        --accent-border: rgba(214, 125, 30, 0.45);
+        --accent-glow: rgba(245, 164, 66, 0.3);
+
+        --nebula: #4b56d2;
+        --nebula-strong: #3943b5;
+        --nebula-soft: rgba(75, 86, 210, 0.1);
+
+        --success: #147a3a;
+        --success-soft: #dcfce7;
+        --warning: #985d07;
+        --warning-soft: #fef3c7;
+        --danger: #b91c1c;
+        --danger-soft: #fee2e2;
+        --maintenance: #7e22ce;
+        --maintenance-soft: #f3e8ff;
+
+        --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+        --shadow: 0 12px 32px -18px rgba(15, 23, 42, 0.22), 0 2px 6px -2px rgba(15, 23, 42, 0.06);
+        --shadow-lg: 0 32px 64px -30px rgba(15, 23, 42, 0.32);
+        --ring: 0 0 0 3px rgba(75, 86, 210, 0.3);
+    }
+}

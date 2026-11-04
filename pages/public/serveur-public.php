@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Security;
+use Bootes\Src\View;
 
 $db = $db ?? Database::getInstance();
 
@@ -18,7 +19,7 @@ $feedbackError   = null;
 if ($serverId === null) {
     // Si aucun ID n'est passé, redirection logique ou sélection du premier serveur public mis en avant
     try {
-        $firstStmt = $db->query('SELECT id_serveur FROM SERVEUR WHERE est_public = 1 ORDER BY statut DESC, joueurs_connectes DESC LIMIT 1');
+        $firstStmt = $db->query("SELECT id_serveur FROM SERVEUR WHERE est_public = 1 ORDER BY CASE statut WHEN 'EN_LIGNE' THEN 0 WHEN 'DEMARRAGE' THEN 1 WHEN 'MAINTENANCE' THEN 2 ELSE 3 END, joueurs_connectes DESC LIMIT 1");
         $foundId   = $firstStmt ? $firstStmt->fetchColumn() : false;
         if ($foundId !== false) {
             $serverId = (int) $foundId;
@@ -39,63 +40,7 @@ if ($serverId === null) {
     return;
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $currentUserId !== null) {
-    $postCsrf = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null;
-    $action   = Security::validateString($_POST['action'] ?? '', 1, 30) ?? '';
-
-    if (!Security::verifyCsrfToken($postCsrf)) {
-        $feedbackError = 'Jeton de sécurité CSRF invalide.';
-    } else {
-        try {
-            if ($action === 'rate_server') {
-                $note        = Security::validatePositiveInt($_POST['note'] ?? null);
-                $commentaire = Security::validateString($_POST['commentaire'] ?? '', 5, 1000);
-
-                if ($note === null || $note < 1 || $note > 5 || $commentaire === null) {
-                    $feedbackError = 'Veuillez attribuer une note de 1 à 5 et saisir un commentaire valide.';
-                } else {
-                    $rateStmt = $db->prepare('
-                        INSERT INTO AVIS_SERVEUR (id_serveur, id_utilisateur, note, commentaire, date_avis)
-                        VALUES (:srv_id, :user_id, :note, :commentaire, NOW())
-                        ON DUPLICATE KEY UPDATE note = VALUES(note), commentaire = VALUES(commentaire), date_avis = NOW()
-                    ');
-                    $rateStmt->execute([
-                        ':srv_id'      => $serverId,
-                        ':user_id'     => $currentUserId,
-                        ':note'        => $note,
-                        ':commentaire' => $commentaire,
-                    ]);
-                    $feedbackMessage = 'Votre évaluation du serveur a été enregistrée.';
-                }
-            } elseif ($action === 'report_server') {
-                $motif       = Security::validateString($_POST['motif'] ?? '', 3, 100);
-                $description = Security::validateString($_POST['description_signalement'] ?? '', 10, 1000);
-
-                if ($motif === null || $description === null) {
-                    $feedbackError = 'Veuillez renseigner un motif et une description détaillée (10 caractères min.).';
-                } else {
-                    $repStmt = $db->prepare('
-                        INSERT INTO SIGNALEMENT (id_auteur_signalement, type_cible, id_cible, motif, description, statut, date_signalement)
-                        VALUES (:user_id, :type_cible, :id_cible, :motif, :description, :statut, NOW())
-                    ');
-                    $repStmt->execute([
-                        ':user_id'     => $currentUserId,
-                        ':type_cible'  => 'SERVEUR',
-                        ':id_cible'    => $serverId,
-                        ':motif'       => $motif,
-                        ':description' => $description,
-                        ':statut'      => 'EN_ATTENTE',
-                    ]);
-                    $feedbackMessage = 'Le signalement concernant ce serveur a été transmis aux administrateurs.';
-                }
-            }
-        } catch (PDOException $e) {
-            error_log(sprintf('[Boötes][ServeurPublic] Erreur POST : %s', $e->getMessage()));
-            $feedbackError = 'Impossible d\'enregistrer votre action pour le moment.';
-        }
-    }
-}
-
+// Visibilité contrôlée AVANT tout traitement : aucune action possible sur un serveur privé d'un tiers.
 $server = null;
 try {
     $stmt = $db->prepare('
@@ -137,6 +82,77 @@ if ($server === null || ((int) $server['est_public'] !== 1 && ($currentUserId ==
     return;
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $currentUserId !== null) {
+    $postCsrf = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null;
+    $action   = Security::validateString($_POST['action'] ?? '', 1, 30) ?? '';
+
+    if (!Security::verifyCsrfToken($postCsrf)) {
+        $feedbackError = 'Jeton de sécurité CSRF invalide.';
+    } else {
+        try {
+            if ($action === 'rate_server') {
+                $note        = Security::validatePositiveInt($_POST['note'] ?? null);
+                $commentaire = Security::validateString($_POST['commentaire'] ?? '', 5, 1000);
+
+                if ((int) $server['id_proprietaire'] === $currentUserId) {
+                    $feedbackError = 'Vous ne pouvez pas évaluer votre propre serveur.';
+                } elseif ($note === null || $note < 1 || $note > 5 || $commentaire === null) {
+                    $feedbackError = 'Veuillez attribuer une note de 1 à 5 et saisir un commentaire valide.';
+                } else {
+                    $rateStmt = $db->prepare('
+                        INSERT INTO AVIS_SERVEUR (id_serveur, id_utilisateur, note, commentaire, date_avis)
+                        VALUES (:srv_id, :user_id, :note, :commentaire, NOW())
+                        ON DUPLICATE KEY UPDATE note = VALUES(note), commentaire = VALUES(commentaire), date_avis = NOW()
+                    ');
+                    $rateStmt->execute([
+                        ':srv_id'      => $serverId,
+                        ':user_id'     => $currentUserId,
+                        ':note'        => $note,
+                        ':commentaire' => $commentaire,
+                    ]);
+                    $feedbackMessage = 'Votre évaluation du serveur a été enregistrée.';
+                }
+            } elseif ($action === 'toggle_favorite') {
+                $favCheck = $db->prepare('SELECT COUNT(*) FROM FAVORI_SERVEUR WHERE id_utilisateur = :uid AND id_serveur = :sid');
+                $favCheck->execute([':uid' => $currentUserId, ':sid' => $serverId]);
+                if ((int) $favCheck->fetchColumn() > 0) {
+                    $db->prepare('DELETE FROM FAVORI_SERVEUR WHERE id_utilisateur = :uid AND id_serveur = :sid')
+                        ->execute([':uid' => $currentUserId, ':sid' => $serverId]);
+                    $feedbackMessage = 'Serveur retiré de vos favoris.';
+                } else {
+                    $db->prepare('INSERT INTO FAVORI_SERVEUR (id_utilisateur, id_serveur, date_ajout) VALUES (:uid, :sid, NOW())')
+                        ->execute([':uid' => $currentUserId, ':sid' => $serverId]);
+                    $feedbackMessage = 'Serveur ajouté à vos favoris.';
+                }
+            } elseif ($action === 'report_server') {
+                $motif       = Security::validateString($_POST['motif'] ?? '', 3, 100);
+                $description = Security::validateString($_POST['description_signalement'] ?? '', 10, 1000);
+
+                if ($motif === null || $description === null) {
+                    $feedbackError = 'Veuillez renseigner un motif et une description détaillée (10 caractères min.).';
+                } else {
+                    $repStmt = $db->prepare('
+                        INSERT INTO SIGNALEMENT (id_auteur_signalement, type_cible, id_cible, motif, description, statut, date_signalement)
+                        VALUES (:user_id, :type_cible, :id_cible, :motif, :description, :statut, NOW())
+                    ');
+                    $repStmt->execute([
+                        ':user_id'     => $currentUserId,
+                        ':type_cible'  => 'SERVEUR',
+                        ':id_cible'    => $serverId,
+                        ':motif'       => $motif,
+                        ':description' => $description,
+                        ':statut'      => 'EN_ATTENTE',
+                    ]);
+                    $feedbackMessage = 'Le signalement concernant ce serveur a été transmis aux administrateurs.';
+                }
+            }
+        } catch (PDOException $e) {
+            error_log(sprintf('[Boötes][ServeurPublic] Erreur POST : %s', $e->getMessage()));
+            $feedbackError = 'Impossible d\'enregistrer votre action pour le moment.';
+        }
+    }
+}
+
 $isOnline       = strtoupper((string) $server['statut']) === 'EN_LIGNE';
 $validPort      = Security::validatePort($server['port'] ?? 25565) ?? 25565;
 $hostAddress    = Security::validateString($server['adresse_ip'] ?? 'play.bootes.local', 3, 100) ?? 'play.bootes.local';
@@ -163,6 +179,30 @@ try {
 } catch (PDOException $e) {
     error_log(sprintf('[Boötes][ServeurPublic] Erreur chargement avis : %s', $e->getMessage()));
 }
+
+// Données de présentation
+$isOwner      = $currentUserId !== null && (int) $server['id_proprietaire'] === $currentUserId;
+$isFavorite   = false;
+if ($currentUserId !== null) {
+    try {
+        $favStmt = $db->prepare('SELECT COUNT(*) FROM FAVORI_SERVEUR WHERE id_utilisateur = :uid AND id_serveur = :sid');
+        $favStmt->execute([':uid' => $currentUserId, ':sid' => $serverId]);
+        $isFavorite = (int) $favStmt->fetchColumn() > 0;
+    } catch (PDOException $e) {
+        error_log(sprintf('[Boötes][ServeurPublic] Erreur lecture favoris : %s', $e->getMessage()));
+    }
+}
+$canReview    = Auth::isLogged() && !$isOwner;
+$slots        = max(1, (int) $server['slots_max']);
+$players      = min(max(0, (int) $server['joueurs_connectes']), $slots);
+$baseUrl      = '/serveur-public?id=' . $serverId;
+$ratingCounts = array_fill(1, 5, 0);
+foreach ($reviews as $rev) {
+    $note = (int) $rev['note'];
+    if ($note >= 1 && $note <= 5) {
+        $ratingCounts[$note]++;
+    }
+}
 ?>
 <article class="public-server" aria-labelledby="public-server-title">
     <?php if ($feedbackMessage !== null): ?>
@@ -177,158 +217,170 @@ try {
         </div>
     <?php endif; ?>
 
-    <header class="public-server__header">
+    <header class="public-server__hero">
         <div class="public-server__identity">
-            <span class="public-server__status <?= $isOnline ? 'public-server__status--online' : 'public-server__status--offline' ?>">
-                <?= $isOnline ? 'En ligne' : 'Hors ligne' ?>
-            </span>
-            <h1 id="public-server-title" class="public-server__title">
-                <?= Security::e((string) $server['nom_serveur']) ?>
-            </h1>
+            <div class="public-server__chips">
+                <?= View::badge('statut_serveur', $server['statut']) ?>
+                <span class="badge"><?= View::icon('box') ?> Minecraft <?= Security::e((string) $server['version_mc']) ?></span>
+                <span class="badge"><?= View::icon('pickaxe') ?> <?= Security::e(View::label('mode_jeu', $server['mode_jeu'])) ?></span>
+                <?php if ((int) $server['est_public'] !== 1): ?>
+                    <span class="badge badge--warning"><?= View::icon('lock') ?> Privé</span>
+                <?php endif; ?>
+            </div>
+            <h1 id="public-server-title" class="public-server__title"><?= Security::e((string) $server['nom_serveur']) ?></h1>
             <p class="public-server__owner">
-                Fondateur : <strong><?= Security::e((string) $server['proprietaire_pseudo']) ?></strong>
+                <span class="avatar" aria-hidden="true"><?= Security::e(View::initials((string) $server['proprietaire_pseudo'])) ?></span>
+                Fondé par <strong><?= Security::e((string) $server['proprietaire_pseudo']) ?></strong>
+                &middot; en ligne depuis le <?= Security::e(View::date((string) $server['date_creation'])) ?>
             </p>
         </div>
 
-        <div class="public-server__join-box">
-            <p class="public-server__address-label">Adresse de connexion directe :</p>
-            <code class="public-server__address-code"><?= Security::e($connectionUri) ?></code>
-            <div class="public-server__cta-group">
-                <a href="minecraft://?addExternalServer=<?= rawurlencode((string) $server['nom_serveur']) ?>|<?= rawurlencode($connectionUri) ?>"
-                   class="public-server__btn public-server__btn--join">
-                    Rejoindre le serveur
-                </a>
-                <?php if ($canManageThis): ?>
-                    <a href="/serveur/dashboard?id=<?= $serverId ?>" class="public-server__btn public-server__btn--manage">
-                        Administrer ce serveur
-                    </a>
-                <?php endif; ?>
+        <div class="public-server__join">
+            <p class="public-server__join-label"><?= View::icon('globe') ?> Adresse du serveur</p>
+            <div class="public-server__address">
+                <code><?= Security::e($connectionUri) ?></code>
+                <button type="button" class="public-server__copy" data-copy="<?= Security::e($connectionUri) ?>"><?= View::icon('copy') ?> Copier</button>
             </div>
+            <p class="public-server__join-help">Dans Minecraft : <strong>Multijoueur › Ajouter un serveur</strong>, puis collez l'adresse.</p>
+            <?php if (Auth::isLogged()): ?>
+                <form action="<?= Security::e($baseUrl) ?>" method="post" class="public-server__favorite-form">
+                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                    <input type="hidden" name="action" value="toggle_favorite">
+                    <button type="submit" class="public-server__favorite<?= $isFavorite ? ' is-favorite' : '' ?>" aria-pressed="<?= $isFavorite ? 'true' : 'false' ?>">
+                        <?= View::icon('heart') ?> <?= $isFavorite ? 'Dans mes favoris' : 'Ajouter aux favoris' ?>
+                    </button>
+                </form>
+            <?php endif; ?>
+            <?php if ($canManageThis): ?>
+                <a href="/serveur/dashboard?id=<?= $serverId ?>" class="public-server__btn public-server__btn--manage"><?= View::icon('settings') ?> Administrer ce serveur</a>
+            <?php endif; ?>
         </div>
     </header>
 
-    <section class="public-server__specs" aria-label="Caractéristiques techniques du serveur">
-        <dl class="public-server__spec-list">
-            <div class="public-server__spec-item">
-                <dt class="public-server__spec-term">Version Minecraft</dt>
-                <dd class="public-server__spec-desc"><?= Security::e((string) $server['version_mc']) ?></dd>
-            </div>
-            <div class="public-server__spec-item">
-                <dt class="public-server__spec-term">Mode de jeu</dt>
-                <dd class="public-server__spec-desc"><?= Security::e((string) $server['mode_jeu']) ?></dd>
-            </div>
-            <div class="public-server__spec-item">
-                <dt class="public-server__spec-term">Joueurs connectés</dt>
-                <dd class="public-server__spec-desc"><?= (int) $server['joueurs_connectes'] ?> / <?= (int) $server['slots_max'] ?></dd>
-            </div>
-            <div class="public-server__spec-item">
-                <dt class="public-server__spec-term">Note des joueurs</dt>
-                <dd class="public-server__spec-desc"><?= Security::e((string) $averageRating) ?> / 5 (<?= count($reviews) ?> avis)</dd>
-            </div>
-        </dl>
-    </section>
-
-    <section class="public-server__presentation" aria-labelledby="server-presentation-title">
-        <h2 id="server-presentation-title" class="public-server__section-title">Présentation du monde</h2>
-        <div class="public-server__description">
-            <p><?= nl2br(Security::e((string) ($server['description'] ?? 'Aucune description fournie par l\'équipe du serveur.'))) ?></p>
+    <dl class="public-server__stats" aria-label="Caractéristiques du serveur">
+        <div class="public-server__stat">
+            <dt><?= View::icon('users') ?> Joueurs connectés</dt>
+            <dd><?= $players ?> / <?= $slots ?></dd>
+            <dd><meter class="public-server__meter" min="0" max="<?= $slots ?>" value="<?= $players ?>" low="<?= (int) ceil($slots * 0.75) ?>" high="<?= (int) ceil($slots * 0.9) ?>" optimum="0" aria-label="Remplissage du serveur"></meter></dd>
         </div>
-    </section>
+        <div class="public-server__stat">
+            <dt><?= View::icon('star') ?> Note des joueurs</dt>
+            <dd><?= !empty($reviews) ? View::number($averageRating, 1) . ' / 5' : '—' ?></dd>
+            <dd><?= View::stars($averageRating) ?> <?= count($reviews) ?> avis</dd>
+        </div>
+        <div class="public-server__stat">
+            <dt><?= View::icon('box') ?> Version</dt>
+            <dd><?= Security::e((string) $server['version_mc']) ?></dd>
+            <dd>Édition Java</dd>
+        </div>
+        <div class="public-server__stat">
+            <dt><?= View::icon('pickaxe') ?> Mode de jeu</dt>
+            <dd><?= Security::e(View::label('mode_jeu', $server['mode_jeu'])) ?></dd>
+            <dd><?= Security::e(View::label('statut_serveur', $server['statut'])) ?></dd>
+        </div>
+    </dl>
 
-    <section class="public-server__reviews" aria-labelledby="server-reviews-title">
-        <h2 id="server-reviews-title" class="public-server__section-title">Évaluations des joueurs</h2>
+    <div class="public-server__layout">
+        <section class="public-server__presentation" aria-labelledby="server-presentation-title">
+            <h2 id="server-presentation-title" class="public-server__section-title"><?= View::icon('earth') ?> Présentation du monde</h2>
+            <div class="public-server__description">
+                <p><?= nl2br(Security::e((string) ($server['description'] ?? '') !== '' ? (string) $server['description'] : 'Aucune description fournie par l\'équipe du serveur.')) ?></p>
+            </div>
+        </section>
 
+        <section id="avis" class="public-server__reviews" aria-labelledby="server-reviews-title">
+            <h2 id="server-reviews-title" class="public-server__section-title"><?= View::icon('star') ?> Avis des joueurs</h2>
+
+            <div class="review-summary">
+                <div class="review-summary__score">
+                    <p class="review-summary__value"><?= !empty($reviews) ? View::number($averageRating, 1) : '—' ?></p>
+                    <?= View::stars($averageRating) ?>
+                    <p class="review-summary__count"><?= count($reviews) ?> avis</p>
+                </div>
+                <dl class="rating-bars">
+                    <?php for ($star = 5; $star >= 1; $star--): ?>
+                        <dt class="rating-bars__label"><?= $star ?> <?= View::icon('star') ?></dt>
+                        <dd class="rating-bars__value">
+                            <meter class="rating-bars__meter" min="0" max="<?= max(1, count($reviews)) ?>" value="<?= $ratingCounts[$star] ?>"
+                                   aria-label="<?= $ratingCounts[$star] ?> avis à <?= $star ?> étoile<?= $star > 1 ? 's' : '' ?>"></meter>
+                        </dd>
+                    <?php endfor; ?>
+                </dl>
+            </div>
+
+            <?php if ($canReview): ?>
+                <form action="<?= Security::e($baseUrl) ?>#avis" method="post" class="review-form">
+                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                    <input type="hidden" name="action" value="rate_server">
+                    <?php
+                    $starInputName = 'note';
+                    $starInputId   = 'srv-note';
+                    require __DIR__ . '/../../includes/star-input.php';
+                    ?>
+                    <div class="public-server__field">
+                        <label for="srv-comment" class="public-server__label">Votre retour d'expérience</label>
+                        <textarea id="srv-comment" name="commentaire" rows="3" minlength="5" maxlength="1000" required
+                                  class="public-server__textarea" placeholder="Ambiance, stabilité, équipe..."></textarea>
+                    </div>
+                    <button type="submit" class="public-server__submit"><?= View::icon('send') ?> Publier mon avis</button>
+                </form>
+            <?php elseif ($isOwner): ?>
+                <p class="public-server__info">C'est votre serveur : vous ne pouvez pas l'évaluer.</p>
+            <?php elseif (!Auth::isLogged()): ?>
+                <p class="public-server__info"><a href="/auth?mode=login">Connectez-vous</a> pour donner votre avis sur ce serveur.</p>
+            <?php endif; ?>
+
+            <?php if (empty($reviews)): ?>
+                <p class="public-server__no-review">Soyez le premier joueur à évaluer ce serveur.</p>
+            <?php else: ?>
+                <div class="review-list">
+                    <?php foreach ($reviews as $rev): ?>
+                        <article class="review-card">
+                            <header class="review-card__header">
+                                <span class="avatar" aria-hidden="true"><?= Security::e(View::initials((string) $rev['pseudo'])) ?></span>
+                                <strong class="review-card__author"><?= Security::e((string) $rev['pseudo']) ?></strong>
+                                <?= View::stars((int) $rev['note']) ?>
+                                <time class="review-card__date" datetime="<?= Security::e((string) $rev['date_avis']) ?>" title="<?= Security::e(View::date((string) $rev['date_avis'], true)) ?>">
+                                    <?= Security::e(View::ago((string) $rev['date_avis'])) ?>
+                                </time>
+                            </header>
+                            <p class="review-card__comment"><?= Security::e((string) $rev['commentaire']) ?></p>
+                        </article>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </section>
+    </div>
+
+    <details class="report-box">
+        <summary id="server-report-title" class="report-box__summary"><?= View::icon('flag') ?> Signaler ce serveur à la modération</summary>
         <?php if (Auth::isLogged()): ?>
-            <form action="/serveur-public?id=<?= $serverId ?>" method="post" class="public-server__review-form">
+            <form action="<?= Security::e($baseUrl) ?>" method="post" class="report-box__form">
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                <input type="hidden" name="action" value="rate_server">
+                <input type="hidden" name="action" value="report_server">
 
-                <div class="public-server__field">
-                    <label for="srv-note" class="public-server__label">Note globale</label>
-                    <select id="srv-note" name="note" required class="public-server__select">
-                        <option value="5">5 / 5 — Serveur remarquable</option>
-                        <option value="4">4 / 5 — Très bonne expérience</option>
-                        <option value="3">3 / 5 — Agréable</option>
-                        <option value="2">2 / 5 — Moyen</option>
-                        <option value="1">1 / 5 — À éviter</option>
+                <div class="report-box__field">
+                    <label for="srv-report-motif" class="report-box__label">Motif du signalement</label>
+                    <select id="srv-report-motif" name="motif" required class="report-box__select">
+                        <option value="EULA_VIOLATION">Non-respect de l'EULA Minecraft</option>
+                        <option value="HARASSMENT">Harcèlement ou propos haineux</option>
+                        <option value="RESOURCE_ABUSE">Abus matériel (lag machine, exploit de plantage)</option>
+                        <option value="ILLEGAL_CONTENT">Contenu illicite</option>
                     </select>
                 </div>
 
-                <div class="public-server__field">
-                    <label for="srv-comment" class="public-server__label">Votre retour d'expérience</label>
-                    <textarea
-                        id="srv-comment"
-                        name="commentaire"
-                        rows="3"
-                        minlength="5"
-                        maxlength="1000"
-                        required
-                        class="public-server__textarea"
-                    ></textarea>
+                <div class="report-box__field">
+                    <label for="srv-report-desc" class="report-box__label">Précisions</label>
+                    <textarea id="srv-report-desc" name="description_signalement" rows="3" minlength="10" maxlength="1000" required
+                              class="report-box__textarea"></textarea>
                 </div>
 
-                <button type="submit" class="public-server__submit">Envoyer mon évaluation</button>
+                <button type="submit" class="report-box__submit">Envoyer le signalement</button>
             </form>
-        <?php endif; ?>
-
-        <?php if (empty($reviews)): ?>
-            <p class="public-server__empty">Soyez le premier joueur à évaluer ce serveur.</p>
         <?php else: ?>
-            <div class="public-server__review-list">
-                <?php foreach ($reviews as $rev): ?>
-                    <article class="review-card">
-                        <header class="review-card__header">
-                            <strong class="review-card__author"><?= Security::e((string) $rev['pseudo']) ?></strong>
-                            <span class="review-card__rating"><?= (int) $rev['note'] ?> / 5</span>
-                            <time class="review-card__date" datetime="<?= Security::e((string) $rev['date_avis']) ?>">
-                                <?= Security::e((string) $rev['date_avis']) ?>
-                            </time>
-                        </header>
-                        <p class="review-card__comment"><?= Security::e((string) $rev['commentaire']) ?></p>
-                    </article>
-                <?php endforeach; ?>
-            </div>
+            <p class="report-box__guest">
+                Vous devez être <a href="/auth?mode=login">connecté</a> pour signaler un serveur.
+            </p>
         <?php endif; ?>
-    </section>
-
-    <section class="public-server__report" aria-labelledby="server-report-title">
-        <details class="report-box">
-            <summary id="server-report-title" class="report-box__summary">Signaler ce serveur à la modération Boötes</summary>
-            <?php if (Auth::isLogged()): ?>
-                <form action="/serveur-public?id=<?= $serverId ?>" method="post" class="report-box__form">
-                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                    <input type="hidden" name="action" value="report_server">
-
-                    <div class="report-box__field">
-                        <label for="srv-report-motif" class="report-box__label">Motif du signalement</label>
-                        <select id="srv-report-motif" name="motif" required class="report-box__select">
-                            <option value="EULA_VIOLATION">Non-respect de l'EULA Minecraft</option>
-                            <option value="HARASSMENT">Harcèlement ou propos haineux</option>
-                            <option value="RESOURCE_ABUSE">Abus matériel (Lag machine / Crash exploit)</option>
-                            <option value="ILLEGAL_CONTENT">Contenu illicite</option>
-                        </select>
-                    </div>
-
-                    <div class="report-box__field">
-                        <label for="srv-report-desc" class="report-box__label">Précisions</label>
-                        <textarea
-                            id="srv-report-desc"
-                            name="description_signalement"
-                            rows="3"
-                            minlength="10"
-                            maxlength="1000"
-                            required
-                            class="report-box__textarea"
-                        ></textarea>
-                    </div>
-
-                    <button type="submit" class="report-box__submit">Envoyer le signalement</button>
-                </form>
-            <?php else: ?>
-                <p class="report-box__guest">
-                    Vous devez être <a href="/auth?mode=login">connecté</a> pour signaler un serveur.
-                </p>
-            <?php endif; ?>
-        </details>
-    </section>
+    </details>
 </article>

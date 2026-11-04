@@ -8,6 +8,7 @@ use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 $db            = $db ?? Database::getInstance();
 $serverManager = new ServerManager($db);
@@ -16,8 +17,11 @@ $serverId      = isset($activeServerId) && is_int($activeServerId)
     ? $activeServerId
     : Security::validatePositiveInt($_GET['id'] ?? null);
 $currentUserId = Auth::getUserId();
+$accessLevel   = $serverId !== null && $currentUserId !== null
+    ? Auth::getServerAccessLevel($currentUserId, $serverId, $db)
+    : null;
 
-if ($serverId === null || $currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)) {
+if ($serverId === null || $currentUserId === null || $accessLevel === null) {
     http_response_code(403);
     ?>
     <section class="server-stats server-stats--forbidden">
@@ -109,10 +113,10 @@ $maxRam      = max(1, (int) $server['ram_allouee']);
 <div class="server-stats">
     <header class="server-stats__header">
         <h1 class="server-stats__title">
-            Statistiques &amp; Télémétrie — <?= Security::e((string) $server['nom_serveur']) ?>
+            Statistiques
         </h1>
         <p class="server-stats__subtitle">
-            Suivi de consommation RAM/CPU (<code>HISTORIQUE_RESSOURCE</code>), temps d'activité et fréquentation des joueurs.
+            Suivi de consommation RAM/CPU, temps d'activité et fréquentation des joueurs.
         </p>
     </header>
 
@@ -137,6 +141,34 @@ $maxRam      = max(1, (int) $server['ram_allouee']);
         </dl>
     </section>
 
+    <?php
+    // Graphiques : mesures remises dans l'ordre chronologique
+    $chronological = array_reverse($resourceHistory);
+    $ramSeries     = array_map(static fn(array $h): int => (int) $h['ram_utilisee_mo'], $chronological);
+    $cpuSeries     = array_map(static fn(array $h): float => (float) $h['cpu_pourcentage'], $chronological);
+    $playerSeries  = array_map(static fn(array $h): int => (int) $h['joueurs_en_ligne'], $chronological);
+    $chartCards    = [
+        ['icon' => 'memory-stick', 'title' => 'Mémoire RAM', 'series' => $ramSeries, 'max' => (float) $maxRam, 'tone' => 'nebula',
+         'value' => (empty($ramSeries) ? '—' : View::number((int) end($ramSeries)) . ' Mo'), 'scale' => 'sur ' . View::number($maxRam) . ' Mo'],
+        ['icon' => 'cpu', 'title' => 'Processeur', 'series' => $cpuSeries, 'max' => 100.0, 'tone' => 'accent',
+         'value' => (empty($cpuSeries) ? '—' : View::number((float) end($cpuSeries), 1) . ' %'), 'scale' => 'sur 100 %'],
+        ['icon' => 'users', 'title' => 'Joueurs', 'series' => $playerSeries, 'max' => (float) max(1, (int) $server['slots_max']), 'tone' => 'success',
+         'value' => (empty($playerSeries) ? '—' : (string) end($playerSeries)), 'scale' => 'sur ' . (int) $server['slots_max'] . ' places'],
+    ];
+    ?>
+    <section class="server-stats__charts" aria-label="Évolution sur les dernières mesures">
+        <?php foreach ($chartCards as $chart): ?>
+            <article class="chart-card">
+                <header class="chart-card__head">
+                    <h2 class="chart-card__title"><?= View::icon($chart['icon']) ?> <?= Security::e($chart['title']) ?></h2>
+                    <p class="chart-card__value"><?= Security::e($chart['value']) ?> <small><?= Security::e($chart['scale']) ?></small></p>
+                </header>
+                <?= View::areaChart($chart['series'], $chart['max'], $chart['tone'], $chart['title'] . ' sur les dernières mesures') ?>
+                <p class="chart-card__caption"><?= count($chart['series']) ?> dernières mesures, de la plus ancienne (à gauche) à la plus récente.</p>
+            </article>
+        <?php endforeach; ?>
+    </section>
+
     <div class="server-stats__grid">
         <!-- CONSOMMATION RAM / CPU (HISTORIQUE_RESSOURCE) -->
         <section class="server-stats__panel" aria-labelledby="telemetry-heading">
@@ -145,7 +177,7 @@ $maxRam      = max(1, (int) $server['ram_allouee']);
             </h2>
 
             <?php if (empty($resourceHistory)): ?>
-                <p class="server-stats__empty">Aucun relevé disponible dans <code>HISTORIQUE_RESSOURCE</code>.</p>
+                <p class="server-stats__empty">Aucune mesure disponible pour le moment.</p>
             <?php else: ?>
                 <table class="telemetry-table">
                     <caption class="telemetry-table__caption">Mesures périodiques des ressources de l'instance</caption>

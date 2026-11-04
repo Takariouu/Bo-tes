@@ -1,0 +1,11 @@
+# Stockage privé : aucun accès HTTP direct et aucune exécution de script,
+# même si les règles du .htaccess racine étaient contournées.
+Require all denied
+Options -Indexes -ExecCGI
+
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>
+<IfModule mod_php7.c>
+    php_flag engine off
+</IfModule>

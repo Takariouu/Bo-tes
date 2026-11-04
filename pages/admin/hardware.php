@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../../src/ServerManager.php';
 
+use Bootes\Config\AppConfig;
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 if (!Auth::isAdmin()) {
     http_response_code(403);
@@ -115,7 +117,10 @@ $load1m  = is_array($loadAvg) && isset($loadAvg[0]) ? round((float) $loadAvg[0],
 $load5m  = is_array($loadAvg) && isset($loadAvg[1]) ? round((float) $loadAvg[1], 2) : 0.0;
 $load15m = is_array($loadAvg) && isset($loadAvg[2]) ? round((float) $loadAvg[2], 2) : 0.0;
 
-$backupsDir = dirname(__DIR__, 2) . '/backups';
+$backupsDir = AppConfig::backupsPath();
+if (!is_dir($backupsDir)) {
+    $backupsDir = AppConfig::storagePath();
+}
 if (!is_dir($backupsDir)) {
     $backupsDir = __DIR__;
 }
@@ -179,8 +184,8 @@ try {
         <form action="/admin/hardware" method="post" class="admin-hardware__emergency-form">
             <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
             <input type="hidden" name="action" value="force_kill_all_overloaded">
-            <button type="submit" class="admin-hardware__btn admin-hardware__btn--emergency">
-                Arrêt d'urgence global (Libérer toute la RAM MC)
+            <button type="submit" class="admin-hardware__btn admin-hardware__btn--emergency admin-hardware__btn--danger" data-confirm="Arrêter de force TOUTES les instances en ligne ?">
+                <?= View::icon('zap') ?> Arrêt d'urgence de tous les serveurs
             </button>
         </form>
     </header>
@@ -316,12 +321,12 @@ try {
                                 <a href="/serveur/dashboard?id=<?= $sid ?>" class="hardware-table__link">
                                     <?= Security::e((string) $srv['nom_serveur']) ?>
                                 </a>
-                                <small>(<?= Security::e((string) $srv['type_loader']) ?> <?= Security::e((string) $srv['version_mc']) ?>)</small>
+                                <small>(<?= Security::e(View::label('loader', $srv['type_loader'])) ?> <?= Security::e((string) $srv['version_mc']) ?>)</small>
                             </th>
                             <td class="hardware-table__cell"><?= Security::e((string) $srv['proprietaire_pseudo']) ?></td>
                             <td class="hardware-table__cell"><code>:<?= (int) $srv['port'] ?></code></td>
                             <td class="hardware-table__cell">
-                                <span class="hardware-table__status"><?= Security::e((string) $srv['statut']) ?></span>
+                                <?= View::badge('statut_serveur', $srv['statut']) ?>
                             </td>
                             <td class="hardware-table__cell">
                                 <?= $realRam ?> Mo / <strong><?= (int) $srv['ram_allouee'] ?> Mo</strong>
@@ -335,7 +340,7 @@ try {
                                         <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                         <input type="hidden" name="action" value="force_kill_server">
                                         <input type="hidden" name="server_id" value="<?= $sid ?>">
-                                        <button type="submit" class="hardware-table__btn hardware-table__btn--kill">
+                                        <button type="submit" class="hardware-table__btn hardware-table__btn--kill" data-confirm="Forcer l'arrêt immédiat (SIGKILL) de ce serveur ?">
                                             Kill Processus (SIGKILL)
                                         </button>
                                     </form>

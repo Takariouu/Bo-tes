@@ -11,6 +11,11 @@ $currentYear = (int) date('Y');
     <footer class="footer" role="contentinfo">
         <div class="footer__container">
             <div class="footer__info">
+                <a href="/home" class="footer__brand-link">
+                    <span class="brand-logo brand-logo--horizontal" aria-hidden="true"></span>
+                    <span class="visually-hidden">Boötes — accueil</span>
+                </a>
+                <p class="footer__tagline">Transformer le vide en lieu de vie</p>
                 <p class="footer__brand">
                     <strong>Boötes</strong> — Infrastructure auto-hébergée de serveurs Minecraft sous Linux Mint.
                 </p>
@@ -28,7 +33,10 @@ $currentYear = (int) date('Y');
                         <a href="/catalogue" class="footer__link">Catalogue</a>
                     </li>
                     <li class="footer__item">
-                        <a href="/serveur-public" class="footer__link">Serveurs Publics</a>
+                        <a href="/catalogue?type=serveur" class="footer__link">Serveurs publics</a>
+                    </li>
+                    <li class="footer__item">
+                        <a href="/offres" class="footer__link">Offres</a>
                     </li>
                     <li class="footer__item">
                         <a href="/cgu" class="footer__link">CGU &amp; Mentions</a>

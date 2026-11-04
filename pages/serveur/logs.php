@@ -8,6 +8,7 @@ use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 $db            = $db ?? Database::getInstance();
 $serverManager = new ServerManager($db);
@@ -16,8 +17,11 @@ $serverId      = isset($activeServerId) && is_int($activeServerId)
     ? $activeServerId
     : Security::validatePositiveInt($_GET['id'] ?? null);
 $currentUserId = Auth::getUserId();
+$accessLevel   = $serverId !== null && $currentUserId !== null
+    ? Auth::getServerAccessLevel($currentUserId, $serverId, $db)
+    : null;
 
-if ($serverId === null || $currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)) {
+if ($serverId === null || $currentUserId === null || $accessLevel === null) {
     http_response_code(403);
     ?>
     <section class="server-logs server-logs--forbidden">
@@ -72,8 +76,8 @@ try {
     $params = [':sid' => $serverId];
 
     if ($playerSearch !== '') {
-        $sql .= ' AND pseudo_mc LIKE :player';
-        $params[':player'] = '%' . $playerSearch . '%';
+        $sql .= ' AND pseudo_mc LIKE :player ESCAPE \'!\'';
+        $params[':player'] = Security::likeContains($playerSearch);
     }
 
     $sql .= ' ORDER BY date_connexion DESC LIMIT 100';
@@ -91,10 +95,10 @@ $isGlobalAdmin = Auth::isAdmin();
     <header class="server-logs__header">
         <div class="server-logs__heading">
             <h1 class="server-logs__title">
-                Journaux &amp; Audit Anti-Triche — <?= Security::e((string) $server['nom_serveur']) ?>
+                Journaux
             </h1>
             <p class="server-logs__subtitle">
-                Inspection de <code>logs/latest.log</code> et traçabilité des sessions joueurs (<code>CONNEXION_JOUEUR</code>).
+                Inspection de <code>logs/latest.log</code> et traçabilité des sessions joueurs.
             </p>
         </div>
 
@@ -168,9 +172,9 @@ $isGlobalAdmin = Auth::isAdmin();
                                     <code><?= Security::e((string) ($conn['adresse_ip'] ?? 'Masquée')) ?></code>
                                 </td>
                             <?php endif; ?>
-                            <td class="connections-table__cell"><?= Security::e((string) $conn['date_connexion']) ?></td>
+                            <td class="connections-table__cell"><?= Security::e(View::date((string) ($conn['date_connexion'] ?? ''), true)) ?></td>
                             <td class="connections-table__cell">
-                                <?= $conn['date_deconnexion'] !== null ? Security::e((string) $conn['date_deconnexion']) : 'En jeu' ?>
+                                <?= $conn['date_deconnexion'] !== null ? Security::e(View::date((string) ($conn['date_deconnexion'] ?? ''), true)) : 'En jeu' ?>
                             </td>
                             <td class="connections-table__cell"><?= (int) $conn['duree_minutes'] ?> min</td>
                             <td class="connections-table__cell"><?= Security::e((string) $conn['motif_deconnexion']) ?></td>
@@ -191,7 +195,7 @@ $isGlobalAdmin = Auth::isAdmin();
                     echo 'Aucune entrée de journal ne correspond à votre filtre.';
                 } else {
                     foreach ($filteredLogs as $line) {
-                        echo Security::e($line) . "\n";
+                        echo View::logLine($line) . "\n";
                     }
                 }
             ?></code></pre>

@@ -10,6 +10,7 @@ use Bootes\Src\Auth;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 if (!Auth::isAdmin()) {
     http_response_code(403);
@@ -151,7 +152,7 @@ $ramUsagePct = round(($stats['allocated_ram_mb'] / ServerManager::HOST_MAX_MC_RA
             <p class="admin-dashboard__eyebrow">Centre de Supervision Globale — Rôle <?= Security::e(Auth::getRole()) ?></p>
             <h1 class="admin-dashboard__title">Tableau de bord Administrateur Boötes</h1>
             <p class="admin-dashboard__subtitle">
-                Vue synthétique de l'infrastructure Linux Mint (Plafond 6 Go allouables sur 8 Go physiques), de la base <code>HEBERGEUR_MC</code> et de l'activité communautaire.
+                Vue synthétique de l'infrastructure Linux Mint (Plafond 6 Go allouables sur 8 Go physiques) et de l'activité communautaire.
             </p>
         </div>
 
@@ -266,7 +267,7 @@ $ramUsagePct = round(($stats['allocated_ram_mb'] / ServerManager::HOST_MAX_MC_RA
                                 </th>
                                 <td class="admin-table__cell"><?= Security::e((string) $srv['proprietaire']) ?></td>
                                 <td class="admin-table__cell">
-                                    <span class="admin-table__badge"><?= Security::e((string) $srv['statut']) ?></span>
+                                    <?= View::badge('statut_serveur', $srv['statut']) ?>
                                 </td>
                                 <td class="admin-table__cell"><?= (int) $srv['ram_allouee'] ?> Mo</td>
                                 <td class="admin-table__cell"><?= (int) $srv['joueurs_connectes'] ?> / <?= (int) $srv['slots_max'] ?></td>
@@ -309,8 +310,8 @@ $ramUsagePct = round(($stats['allocated_ram_mb'] / ServerManager::HOST_MAX_MC_RA
                                 <td class="admin-table__cell">#<?= (int) $tkt['id_ticket'] ?></td>
                                 <td class="admin-table__cell"><?= Security::e((string) $tkt['pseudo']) ?></td>
                                 <th scope="row" class="admin-table__cell"><?= Security::e((string) $tkt['sujet']) ?></th>
-                                <td class="admin-table__cell"><?= Security::e((string) $tkt['categorie']) ?></td>
-                                <td class="admin-table__cell"><?= Security::e((string) $tkt['statut']) ?></td>
+                                <td class="admin-table__cell"><?= Security::e(View::label('categorie_ticket', $tkt['categorie'])) ?></td>
+                                <td class="admin-table__cell"><?= View::badge('ticket', $tkt['statut']) ?></td>
                                 <td class="admin-table__cell">
                                     <a href="/user/compte?id=<?= (int) $tkt['id_utilisateur'] ?>#section-tickets" class="admin-table__action-link">
                                         Répondre

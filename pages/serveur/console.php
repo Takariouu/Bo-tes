@@ -8,6 +8,7 @@ use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\Security;
 use Bootes\Src\ServerManager;
+use Bootes\Src\View;
 
 $db            = $db ?? Database::getInstance();
 $serverManager = new ServerManager($db);
@@ -16,8 +17,11 @@ $serverId      = isset($activeServerId) && is_int($activeServerId)
     ? $activeServerId
     : Security::validatePositiveInt($_GET['id'] ?? $_POST['server_id'] ?? null);
 $currentUserId = Auth::getUserId();
+$accessLevel   = $serverId !== null && $currentUserId !== null
+    ? Auth::getServerAccessLevel($currentUserId, $serverId, $db)
+    : null;
 
-if ($serverId === null || $currentUserId === null || !Auth::canManageServer($currentUserId, $serverId, $db)) {
+if ($serverId === null || $currentUserId === null || $accessLevel === null) {
     http_response_code(403);
     ?>
     <section class="server-console server-console--forbidden">
@@ -42,6 +46,7 @@ $csrfToken       = Security::generateCsrfToken();
 $feedbackMessage = null;
 $feedbackError   = null;
 $senderPseudo    = (string) ($_SESSION['user']['pseudo'] ?? 'Operateur');
+$canSendCommands = Auth::serverLevelAllows($accessLevel, Auth::SERVER_PERM_CONSOLE);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $postCsrf = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null;
@@ -49,6 +54,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!Security::verifyCsrfToken($postCsrf)) {
         $feedbackError = 'Jeton CSRF invalide. Veuillez réessayer.';
+    } elseif ($action === 'send_command' && !$canSendCommands) {
+        $feedbackError = Auth::serverPermissionError($accessLevel);
     } elseif ($action === 'send_command') {
         $rawCommand = (string) ($_POST['command'] ?? '');
         $res        = $serverManager->sendConsoleCommand($serverId, $rawCommand, $senderPseudo);
@@ -68,16 +75,16 @@ $logLines = $serverManager->readLatestLog($serverId, 120);
     <header class="server-console__header">
         <div class="server-console__heading">
             <h1 id="console-title" class="server-console__title">
-                Console Temps Réel — <?= Security::e((string) $server['nom_serveur']) ?>
+                Console
             </h1>
             <p class="server-console__subtitle">
-                Statut : <strong><?= Security::e((string) $server['statut']) ?></strong>
+                Statut : <strong><?= Security::e(View::label('statut_serveur', $server['statut'])) ?></strong>
                 &bull; Flux direct depuis <code>logs/latest.log</code>
             </p>
         </div>
         <div class="server-console__actions">
             <a href="/serveur/console?id=<?= $serverId ?>" class="server-console__refresh-btn">Actualiser le flux</a>
-            <a href="/serveur/dashboard?id=<?= $serverId ?>" class="server-console__back-btn">Dashboard</a>
+            <a href="/serveur/dashboard?id=<?= $serverId ?>" class="server-console__back-btn">Tableau de bord</a>
         </div>
     </header>
 
@@ -99,7 +106,7 @@ $logLines = $serverManager->readLatestLog($serverId, 120);
         </div>
         <pre class="terminal__output"><code class="terminal__code"><?php
             foreach ($logLines as $line) {
-                echo Security::e($line) . "\n";
+                echo View::logLine($line) . "\n";
             }
         ?></code></pre>
     </div>
@@ -118,14 +125,14 @@ $logLines = $serverManager->readLatestLog($serverId, 120);
                 type="text"
                 id="mc-command-input"
                 name="command"
-                placeholder="<?= $isOnline ? 'say Bonjour depuis le panel Boötes !' : 'Démarrez le serveur pour envoyer des commandes...' ?>"
+                placeholder="<?= !$canSendCommands ? "Votre niveau d'accès ne permet pas d'envoyer de commandes" : ($isOnline ? 'say Bonjour depuis le panel Boötes !' : 'Démarrez le serveur pour envoyer des commandes...') ?>"
                 maxlength="200"
                 required
                 autocomplete="off"
                 class="console-form__input"
-                <?= !$isOnline ? 'disabled' : '' ?>
+                <?= !$isOnline || !$canSendCommands ? 'disabled' : '' ?>
             >
-            <button type="submit" class="console-form__submit" <?= !$isOnline ? 'disabled' : '' ?>>
+            <button type="submit" class="console-form__submit" <?= !$isOnline || !$canSendCommands ? 'disabled' : '' ?>>
                 Exécuter
             </button>
         </div>

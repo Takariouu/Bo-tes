@@ -8,6 +8,7 @@ use Bootes\Config\Database;
 use Bootes\Src\Auth;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
+use Bootes\Src\View;
 
 $db              = $db ?? Database::getInstance();
 $resourceManager = new ResourceManager($db);
@@ -120,7 +121,7 @@ $typeLabel      = ResourceManager::getTypeLabel((string) $resource['type_ressour
                     <select id="stats-res-select" name="id" class="creator-stats__switcher-select">
                         <?php foreach ($userResources as $ur): ?>
                             <option value="<?= (int) $ur['id_ressource'] ?>" <?= (int) $ur['id_ressource'] === $requestedId ? 'selected' : '' ?>>
-                                [<?= Security::e((string) $ur['type_ressource']) ?>] <?= Security::e((string) $ur['nom_ressource']) ?>
+                                [<?= Security::e(View::label('type_ressource', $ur['type_ressource'])) ?>] <?= Security::e((string) $ur['nom_ressource']) ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
@@ -223,6 +224,11 @@ $typeLabel      = ResourceManager::getTypeLabel((string) $resource['type_ressour
             <?php if (empty($monthlyEvolution)): ?>
                 <p class="creator-stats__empty">Aucune donnée d'évolution mensuelle disponible pour le moment.</p>
             <?php else: ?>
+                <?php
+                $evolutionSorted = $monthlyEvolution;
+                usort($evolutionSorted, static fn(array $a, array $b): int => strcmp((string) $a['periode'], (string) $b['periode']));
+                ?>
+                <?= View::areaChart(array_map(static fn(array $evo): int => (int) $evo['nb_installations'], $evolutionSorted), 1.0, 'accent', 'Installations sur des serveurs, par mois') ?>
                 <table class="stats-table">
                     <caption class="stats-table__caption">Installations directes sur les serveurs par mois</caption>
                     <thead class="stats-table__head">

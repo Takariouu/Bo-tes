@@ -28,10 +28,12 @@ $lastUpdateDate = '2026-03-01';
         </ol>
     </nav>
 
+    <div class="legal-doc__body">
+
     <section id="mentions-legales" class="legal-doc__section" aria-labelledby="heading-mentions">
         <h2 id="heading-mentions" class="legal-doc__section-title">1. Mentions légales de l'hébergeur</h2>
         <p class="legal-doc__paragraph">
-            La plateforme web <strong>Boötes</strong> est un projet d'hébergement communautaire auto-hébergé opérant sur une infrastructure dédiée sous système d'exploitation <strong>Linux Mint</strong> et moteur de base de données relationnelle <strong>MariaDB</strong> (<code>HEBERGEUR_MC</code>).
+            La plateforme web <strong>Boötes</strong> est un projet d'hébergement communautaire auto-hébergé opérant sur une infrastructure dédiée sous système d'exploitation <strong>Linux Mint</strong> et moteur de base de données relationnelle <strong>MariaDB</strong>.
         </p>
         <dl class="legal-doc__definitions">
             <div class="legal-doc__def-row">
@@ -95,7 +97,7 @@ $lastUpdateDate = '2026-03-01';
         </p>
         <ul class="legal-doc__list">
             <li class="legal-doc__list-item">
-                <strong>Données d'authentification :</strong> Seuls votre pseudonyme, votre adresse e-mail et l'empreinte cryptographique de votre mot de passe (hachée de manière irréversible via <code>PASSWORD_ARGON2ID</code>) sont stockés dans la base <code>HEBERGEUR_MC</code>.
+                <strong>Données d'authentification :</strong> Seuls votre pseudonyme, votre adresse e-mail et l'empreinte cryptographique de votre mot de passe (hachée de manière irréversible via <code>PASSWORD_ARGON2ID</code>) sont stockés dans notre base de données.
             </li>
             <li class="legal-doc__list-item">
                 <strong>Journalisation des adresses IP (Logs système et serveurs) :</strong> Conformément aux obligations légales des hébergeurs et pour assurer la sécurité de l'infrastructure (prévention des attaques par force brute, audit Super-Admin et journaux de connexion Minecraft), les adresses IP et horodatages de connexion sont conservés pour une durée strictement limitée à 12 mois glissants avant purge automatique.
@@ -115,4 +117,5 @@ $lastUpdateDate = '2026-03-01';
             Depuis votre espace <a href="/user/compte" class="legal-doc__link">Mon Compte</a>, vous pouvez modifier vos informations personnelles ou demander la suppression intégrale et définitive de votre compte utilisateur, ce qui entraîne la destruction en cascade de vos instances de serveurs, sauvegardes (<code>/backups</code>) et données associées.
         </p>
     </section>
+    </div>
 </article>

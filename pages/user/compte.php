@@ -6,16 +6,20 @@ require_once __DIR__ . '/../../src/ResourceManager.php';
 
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
+use Bootes\Src\Http;
 use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
+use Bootes\Src\ServerManager;
+use Bootes\Src\UserManager;
+use Bootes\Src\View;
 
 $db              = $db ?? Database::getInstance();
 $resourceManager = new ResourceManager($db);
+$serverManager   = new ServerManager($db);
 
 $loggedUserId = Auth::getUserId();
 if ($loggedUserId === null) {
-    header('Location: /auth?mode=login');
-    exit;
+    Http::redirect('/auth?mode=login');
 }
 
 // Détection du mode modération Admin (?id=X)
@@ -24,7 +28,10 @@ $isAdminView     = false;
 $targetUserId    = $loggedUserId;
 
 if ($requestedUserId !== null && $requestedUserId !== $loggedUserId) {
-    if (Auth::isAdmin()) {
+    // Un administrateur ne gère que des comptes de rang strictement inférieur au sien (anti-escalade).
+    $targetRole = Auth::isAdmin() ? Auth::getUserRole($requestedUserId, $db) : null;
+
+    if ($targetRole !== null && Auth::canAdministrate(Auth::getRole(), $targetRole)) {
         $targetUserId = $requestedUserId;
         $isAdminView  = true;
     } else {
@@ -32,7 +39,7 @@ if ($requestedUserId !== null && $requestedUserId !== $loggedUserId) {
         ?>
         <section class="account account--forbidden">
             <h1 class="account__title">Accès refusé</h1>
-            <p class="account__message">Vous n'avez pas l'autorisation de consulter ou modifier le profil d'un autre utilisateur.</p>
+            <p class="account__message">Vous n'avez pas l'autorisation de consulter ou modifier ce profil (compte inexistant ou de rang égal ou supérieur au vôtre).</p>
             <a href="/user/compte" class="account__btn">Retourner sur mon profil</a>
         </section>
         <?php
@@ -65,6 +72,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         break;
                     }
 
+                    $currentIdentity = $db->prepare('SELECT pseudo, email FROM UTILISATEUR WHERE id_utilisateur = :uid');
+                    $currentIdentity->execute([':uid' => $targetUserId]);
+                    $identityRow    = $currentIdentity->fetch(PDO::FETCH_ASSOC) ?: ['pseudo' => '', 'email' => ''];
+                    $pseudoChanged  = mb_strtolower($newPseudo, 'UTF-8') !== mb_strtolower((string) $identityRow['pseudo'], 'UTF-8');
+                    $emailChanged   = mb_strtolower($newEmail, 'UTF-8') !== mb_strtolower((string) $identityRow['email'], 'UTF-8');
+
+                    if (
+                        ($pseudoChanged && Auth::isReservedIdentity($newPseudo, '')) ||
+                        ($emailChanged && Auth::isReservedIdentity('', $newEmail))
+                    ) {
+                        $feedbackError = 'Ce pseudonyme ou cette adresse e-mail est réservé(e) par la plateforme.';
+                        break;
+                    }
+
                     $dupStmt = $db->prepare('
                         SELECT COUNT(*)
                         FROM UTILISATEUR
@@ -82,27 +103,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         break;
                     }
 
-                    if (!$isAdminView) {
-                        $pwdCheckStmt = $db->prepare('SELECT mot_de_passe FROM UTILISATEUR WHERE id_utilisateur = :uid');
-                        $pwdCheckStmt->execute([':uid' => $targetUserId]);
-                        $storedHash = (string) $pwdCheckStmt->fetchColumn();
-
-                        if (!password_verify($currentPassword, $storedHash)) {
-                            $feedbackError = 'Votre mot de passe actuel est requis et doit être exact pour modifier le profil.';
-                            break;
-                        }
+                    if (!$isAdminView && !Auth::verifyPassword($targetUserId, $currentPassword, $db)) {
+                        $feedbackError = 'Votre mot de passe actuel est requis et doit être exact pour modifier le profil.';
+                        break;
                     }
 
                     if ($newPassword !== '') {
-                        if (mb_strlen($newPassword, 'UTF-8') < 10) {
+                        if (!Auth::isAcceptablePassword($newPassword)) {
                             $feedbackError = 'Le nouveau mot de passe doit contenir au moins 10 caractères.';
                             break;
                         }
-                        $newHash = password_hash($newPassword, PASSWORD_ARGON2ID, [
-                            'memory_cost' => 65536,
-                            'time_cost'   => 4,
-                            'threads'     => 2,
-                        ]);
+                        $newHash = Auth::hashPassword($newPassword);
                         $updStmt = $db->prepare('
                             UPDATE UTILISATEUR
                             SET pseudo = :pseudo, email = :email, mot_de_passe = :hash
@@ -130,6 +141,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if (!$isAdminView && isset($_SESSION['user'])) {
                         $_SESSION['user']['pseudo'] = $newPseudo;
                         $_SESSION['user']['email']  = $newEmail;
+                        if ($newPassword !== '') {
+                            session_regenerate_id(true);
+                        }
                     }
 
                     $feedbackMessage = 'Les informations du profil ont été mises à jour.';
@@ -173,119 +187,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         break;
                     }
 
-                    $db->beginTransaction();
-
-                    if ($rgpdMode === 'delete_all') {
-                        $resourceManager->deleteUserResources($targetUserId);
-                    } else {
-                        // Recherche ou création d'un compte anonyme système pour conserver l'intégrité des ressources
-                        $anonStmt = $db->query("SELECT id_utilisateur FROM UTILISATEUR WHERE pseudo = 'Anonyme_RGPD' LIMIT 1");
-                        $anonId   = $anonStmt ? $anonStmt->fetchColumn() : false;
-
-                        if ($anonId === false) {
-                            $createAnon = $db->prepare("
-                                INSERT INTO UTILISATEUR (pseudo, email, mot_de_passe, role, type_compte, max_ram_allouable, date_inscription)
-                                VALUES ('Anonyme_RGPD', 'anonyme-rgpd@bootes.local', :hash, 'UTILISATEUR', 'STANDARD', 0, NOW())
-                            ");
-                            $createAnon->execute([':hash' => password_hash(bin2hex(random_bytes(16)), PASSWORD_ARGON2ID)]);
-                            $anonId = (int) $db->lastInsertId();
-                        }
-
-                        $resourceManager->anonymizeUserResources($targetUserId, (int) $anonId);
-                    }
-
-                    $db->prepare('DELETE FROM RELATION_UTILISATEUR WHERE id_demandeur = :u1 OR id_destinataire = :u2')
-                       ->execute([':u1' => $targetUserId, ':u2' => $targetUserId]);
-
-                    $db->prepare('DELETE FROM ADMINISTRER_SERVEUR WHERE id_utilisateur = :uid')
-                       ->execute([':uid' => $targetUserId]);
-
-                    $db->prepare('DELETE FROM SERVEUR WHERE id_proprietaire = :uid')
-                       ->execute([':uid' => $targetUserId]);
-
-                    $db->prepare('DELETE FROM UTILISATEUR WHERE id_utilisateur = :uid')
-                       ->execute([':uid' => $targetUserId]);
-
-                    $db->commit();
-
-                    if (!$isAdminView) {
-                        Auth::logout();
-                        header('Location: /home');
-                        exit;
-                    }
-
-                    $feedbackMessage = 'Le compte utilisateur et ses données personnelles ont été purgés conformément au RGPD.';
-                    break;
-
-                case 'create_server':
-                    $serverName = Security::validateString($_POST['nom_serveur'] ?? '', 3, 50);
-                    $mcVersion  = Security::validateString($_POST['version_mc'] ?? '1.21.4', 3, 20) ?? '1.21.4';
-                    $gameMode   = Security::validateString($_POST['mode_jeu'] ?? 'SURVIE', 3, 30) ?? 'SURVIE';
-                    $slotsMax   = Security::validatePositiveInt($_POST['slots_max'] ?? 20) ?? 20;
-                    $isPublic   = isset($_POST['est_public']) && $_POST['est_public'] === '1' ? 1 : 0;
-                    $descSrv    = Security::validateString($_POST['description'] ?? '', 0, 500) ?? '';
-
-                    // Vérification du profil de compte pour le plafond RAM (2 Go Standard vs 6 Go Premium)
-                    $userTierStmt = $db->prepare('SELECT type_compte, max_ram_allouable FROM UTILISATEUR WHERE id_utilisateur = :uid');
-                    $userTierStmt->execute([':uid' => $targetUserId]);
-                    $tierRow    = $userTierStmt->fetch(PDO::FETCH_ASSOC);
-                    $isPremium  = strtoupper((string) ($tierRow['type_compte'] ?? 'STANDARD')) === Auth::ACCOUNT_PREMIUM;
-                    $ramAlloc   = Security::validateRamAllocation($_POST['ram_allouee'] ?? 2048, $isPremium);
-
-                    if ($serverName === null || $ramAlloc === null) {
-                        $feedbackError = 'Nom de serveur invalide ou allocation RAM hors des limites autorisées pour votre offre.';
+                    // Ré-authentification obligatoire du titulaire avant une suppression irréversible.
+                    if (!$isAdminView && !Auth::verifyPassword($targetUserId, (string) ($_POST['current_password'] ?? ''), $db)) {
+                        $feedbackError = 'Votre mot de passe actuel est requis pour confirmer la suppression du compte.';
                         break;
                     }
 
-                    // Attribution dynamique d'un port libre entre 25565 et 26500
-                    $portStmt = $db->query('SELECT COALESCE(MAX(port), 25564) + 1 FROM SERVEUR');
-                    $nextPort = Security::validatePort($portStmt ? $portStmt->fetchColumn() : 25565) ?? 25565;
+                    $userManager = new UserManager($db, $serverManager, $resourceManager);
+                    if (!$userManager->deleteAccount($targetUserId, $rgpdMode === 'delete_all')) {
+                        $feedbackError = 'La suppression du compte a échoué : aucune donnée n\'a été modifiée. Contactez le support.';
+                        break;
+                    }
 
-                    $insSrv = $db->prepare('
-                        INSERT INTO SERVEUR (
-                            id_proprietaire,
-                            nom_serveur,
-                            adresse_ip,
-                            port,
-                            version_mc,
-                            mode_jeu,
-                            statut,
-                            joueurs_connectes,
-                            slots_max,
-                            ram_allouee,
-                            description,
-                            est_public,
-                            date_creation
-                        ) VALUES (
-                            :owner,
-                            :nom,
-                            :ip,
-                            :port,
-                            :version,
-                            :mode,
-                            \'HORS_LIGNE\',
-                            0,
-                            :slots,
-                            :ram,
-                            :desc,
-                            :public,
-                            NOW()
-                        )
-                    ');
-                    $insSrv->execute([
-                        ':owner'   => $targetUserId,
-                        ':nom'     => $serverName,
-                        ':ip'      => 'play.bootes.local',
-                        ':port'    => $nextPort,
-                        ':version' => $mcVersion,
-                        ':mode'    => $gameMode,
-                        ':slots'   => min(100, max(2, $slotsMax)),
-                        ':ram'     => $ramAlloc,
-                        ':desc'    => $descSrv,
-                        ':public'  => $isPublic,
-                    ]);
+                    if (!$isAdminView) {
+                        Auth::logout();
+                        Http::redirect('/home', 'Votre compte et vos données personnelles ont été supprimés définitivement.');
+                    }
 
-                    $feedbackMessage = sprintf('Serveur "%s" créé avec succès sur le port %d.', $serverName, $nextPort);
+                    Http::redirect('/admin/utilisateurs', 'Le compte utilisateur et ses données personnelles ont été purgés conformément au RGPD.');
+
+                case 'create_server':
+                    $creation = $serverManager->createServer($targetUserId, $_POST, $isAdminView && Auth::isAdmin());
+                    if ($creation['success']) {
+                        $feedbackMessage = $creation['message'];
+                    } else {
+                        $feedbackError = $creation['message'];
+                    }
                     break;
 
                 case 'add_friend':
@@ -607,28 +534,83 @@ try {
     error_log(sprintf('[Boötes][Compte] Erreur chargement tickets : %s', $e->getMessage()));
 }
 
+// 6. Serveurs favoris (fiches publiques mises de côté)
+$favoriteServers = [];
+try {
+    $favQuery = $db->prepare('
+        SELECT s.id_serveur, s.nom_serveur, s.version_mc, s.mode_jeu, s.statut, s.joueurs_connectes, s.slots_max,
+               s.description, u.pseudo AS proprietaire_pseudo,
+               COALESCE((SELECT AVG(a.note) FROM AVIS_SERVEUR a WHERE a.id_serveur = s.id_serveur), 0) AS note_moyenne
+        FROM FAVORI_SERVEUR f
+        INNER JOIN SERVEUR s ON s.id_serveur = f.id_serveur
+        INNER JOIN UTILISATEUR u ON u.id_utilisateur = s.id_proprietaire
+        WHERE f.id_utilisateur = :uid AND (s.est_public = 1 OR s.id_proprietaire = :uid_owner)
+        ORDER BY f.date_ajout DESC
+    ');
+    $favQuery->execute([':uid' => $targetUserId, ':uid_owner' => $targetUserId]);
+    $favoriteServers = $favQuery->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+    error_log(sprintf('[Boötes][Compte] Erreur chargement favoris : %s', $e->getMessage()));
+}
+
 $formTargetUrl = $isAdminView ? '/user/compte?id=' . $targetUserId : '/user/compte';
 $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCOUNT_PREMIUM;
+$ramCeiling    = ServerManager::ramCeilingFor((string) $userProfile['type_compte'], (int) $userProfile['max_ram_allouable']);
+$maxServers    = ServerManager::maxServersFor((string) $userProfile['type_compte']);
+
+// Données de présentation
+$ownedServers  = count(array_filter($myServers, static fn(array $srv): bool => (int) $srv['id_proprietaire'] === $targetUserId));
+$openTickets   = count(array_filter($tickets, static fn(array $tkt): bool => strtoupper((string) $tkt['statut']) !== 'FERME'));
+$sectionUrl    = static fn(string $section): string => $formTargetUrl . '#' . $section;
+$ramDefault    = min(2048, max(512, $ramCeiling));
+$ramMax        = $isAdminView ? ServerManager::HOST_MAX_MC_RAM_MB : max(512, $ramCeiling);
 ?>
-<div class="account">
+<div class="account" data-tabs>
     <header class="account__header">
-        <div class="account__heading">
-            <h1 class="account__title">
-                <?= $isAdminView ? 'Inspection Administrateur : Compte de ' . Security::e((string) $userProfile['pseudo']) : 'Mon Compte Boötes' ?>
-            </h1>
-            <p class="account__subtitle">
-                Membre depuis le <time datetime="<?= Security::e((string) $userProfile['date_inscription']) ?>"><?= Security::e((string) $userProfile['date_inscription']) ?></time>
-                &bull; Offre : <strong><?= Security::e((string) $userProfile['type_compte']) ?></strong>
-                (Plafond RAM : <?= (int) $userProfile['max_ram_allouable'] ?> Mo)
-            </p>
-        </div>
-        <?php if ($isAdminView): ?>
-            <aside class="account__admin-banner" aria-label="Avertissement mode administration">
-                <p class="account__admin-notice">
-                    Vous consultez et modérez ce profil avec vos privilèges <strong><?= Security::e(Auth::getRole()) ?></strong>.
+        <div class="account__identity">
+            <span class="avatar avatar--xl" aria-hidden="true"><?= Security::e(View::initials((string) $userProfile['pseudo'])) ?></span>
+            <div class="account__heading">
+                <p class="account__eyebrow"><?= $isAdminView ? 'Inspection administrateur' : 'Mon espace' ?></p>
+                <h1 class="account__title"><?= Security::e((string) $userProfile['pseudo']) ?></h1>
+                <p class="account__subtitle">
+                    <?= View::badge('role', $userProfile['role'] ?? 'UTILISATEUR') ?>
+                    <?= View::badge('offre', $userProfile['type_compte']) ?>
+                    <span>Membre depuis le <time datetime="<?= Security::e((string) $userProfile['date_inscription']) ?>"><?= Security::e(View::date((string) $userProfile['date_inscription'])) ?></time></span>
                 </p>
-                <a href="/admin/utilisateurs" class="account__btn account__btn--back">Retour à la liste des utilisateurs</a>
-            </aside>
+            </div>
+        </div>
+
+        <dl class="account__stats">
+            <div class="account__stat">
+                <dt>Serveurs</dt>
+                <dd><?= $ownedServers ?> / <?= $maxServers ?></dd>
+                <dd><meter min="0" max="<?= $maxServers ?>" value="<?= $ownedServers ?>" class="account__meter" aria-label="Serveurs créés sur le maximum de l'offre"></meter></dd>
+            </div>
+            <div class="account__stat">
+                <dt>Quota RAM</dt>
+                <dd><?= Security::e(View::number((int) $userProfile['max_ram_allouable'] / 1024, 1)) ?> Go</dd>
+                <dd><?= (int) $userProfile['max_ram_allouable'] ?> Mo au total</dd>
+            </div>
+            <div class="account__stat">
+                <dt>Créations</dt>
+                <dd><?= count($myCreations) ?></dd>
+                <dd>mods, plugins, modpacks</dd>
+            </div>
+            <div class="account__stat">
+                <dt>Amis</dt>
+                <dd><?= count($acceptedFriends) ?></dd>
+                <dd><?= count($pendingReceived) ?> demande<?= count($pendingReceived) > 1 ? 's' : '' ?> reçue<?= count($pendingReceived) > 1 ? 's' : '' ?></dd>
+            </div>
+        </dl>
+
+        <?php if ($isAdminView): ?>
+            <div class="account__admin-banner">
+                <p class="account__admin-notice">
+                    Vous consultez ce profil avec vos privilèges <strong><?= Security::e(View::label('role', Auth::getRole())) ?></strong> :
+                    chaque modification est appliquée au compte de <?= Security::e((string) $userProfile['pseudo']) ?>.
+                </p>
+                <a href="/admin/utilisateurs" class="account__btn account__btn--back"><?= View::icon('arrow-left') ?> Retour aux utilisateurs</a>
+            </div>
         <?php endif; ?>
     </header>
 
@@ -644,432 +626,290 @@ $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCO
         </div>
     <?php endif; ?>
 
-    <nav class="account__quick-nav" aria-label="Accès rapide aux sections du compte">
-        <ul class="account__nav-list">
-            <li class="account__nav-item"><a href="#section-profil" class="account__nav-link">Profil &amp; RGPD</a></li>
-            <li class="account__nav-item"><a href="#section-serveurs" class="account__nav-link">Mes Serveurs (<?= count($myServers) ?>)</a></li>
-            <li class="account__nav-item"><a href="#section-creations" class="account__nav-link">Mes Créations (<?= count($myCreations) ?>)</a></li>
-            <li class="account__nav-item"><a href="#section-amis" class="account__nav-link">Liste d'Amis (<?= count($acceptedFriends) ?>)</a></li>
-            <li class="account__nav-item"><a href="#section-tickets" class="account__nav-link">Tickets Support (<?= count($tickets) ?>)</a></li>
-        </ul>
+    <nav class="tabs__list account__tabs" aria-label="Rubriques du compte" data-tablist>
+        <a href="#section-serveurs" class="tabs__tab" data-tab><?= View::icon('server') ?> Serveurs <span class="tabs__count"><?= count($myServers) ?></span></a>
+        <a href="#section-creations" class="tabs__tab" data-tab><?= View::icon('blocks') ?> Créations <span class="tabs__count"><?= count($myCreations) ?></span></a>
+        <a href="#section-amis" class="tabs__tab" data-tab><?= View::icon('users') ?> Amis
+            <?php if (!empty($pendingReceived)): ?>
+                <span class="tabs__count tabs__count--alert" title="Demandes reçues"><?= count($pendingReceived) ?></span>
+            <?php else: ?>
+                <span class="tabs__count"><?= count($acceptedFriends) ?></span>
+            <?php endif; ?>
+        </a>
+        <a href="#section-tickets" class="tabs__tab" data-tab><?= View::icon('life-buoy') ?> Support <span class="tabs__count"><?= $openTickets ?></span></a>
+        <a href="#section-profil" class="tabs__tab" data-tab><?= View::icon('settings') ?> Profil et sécurité</a>
     </nav>
 
-    <!-- 1. INFORMATIONS DU PROFIL & RGPD -->
-    <section id="section-profil" class="account__section account__section--profile" aria-labelledby="heading-profil">
-        <h2 id="heading-profil" class="account__section-title">Informations du profil et sécurité</h2>
-
-        <div class="account__profile-grid">
-            <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="account-form account-form--identity">
-                <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                <input type="hidden" name="action" value="update_profile">
-                <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
-
-                <fieldset class="account-form__fieldset">
-                    <legend class="account-form__legend">Identifiants et mot de passe</legend>
-
-                    <div class="account-form__field">
-                        <label for="profile-pseudo" class="account-form__label">Pseudonyme</label>
-                        <input
-                            type="text"
-                            id="profile-pseudo"
-                            name="pseudo"
-                            value="<?= Security::e((string) $userProfile['pseudo']) ?>"
-                            minlength="3"
-                            maxlength="32"
-                            required
-                            class="account-form__input"
-                        >
-                    </div>
-
-                    <div class="account-form__field">
-                        <label for="profile-email" class="account-form__label">Adresse e-mail</label>
-                        <input
-                            type="email"
-                            id="profile-email"
-                            name="email"
-                            value="<?= Security::e((string) $userProfile['email']) ?>"
-                            required
-                            class="account-form__input"
-                        >
-                    </div>
-
-                    <?php if (!$isAdminView): ?>
-                        <div class="account-form__field">
-                            <label for="profile-current-pwd" class="account-form__label">Mot de passe actuel (requis pour valider)</label>
-                            <input
-                                type="password"
-                                id="profile-current-pwd"
-                                name="current_password"
-                                required
-                                autocomplete="current-password"
-                                class="account-form__input"
-                            >
-                        </div>
-                    <?php endif; ?>
-
-                    <div class="account-form__field">
-                        <label for="profile-new-pwd" class="account-form__label">Nouveau mot de passe (laisser vide pour conserver l'actuel)</label>
-                        <input
-                            type="password"
-                            id="profile-new-pwd"
-                            name="new_password"
-                            minlength="10"
-                            autocomplete="new-password"
-                            class="account-form__input"
-                        >
-                    </div>
-
-                    <button type="submit" class="account-form__submit">Enregistrer les modifications</button>
-                </fieldset>
-            </form>
-
-            <?php if ($isAdminView && Auth::isAdmin()): ?>
-                <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="account-form account-form--moderation">
-                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                    <input type="hidden" name="action" value="admin_update_account">
-                    <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
-
-                    <fieldset class="account-form__fieldset">
-                        <legend class="account-form__legend">Modération Admin &amp; Quotas Matériels</legend>
-
-                        <div class="account-form__field">
-                            <label for="admin-tier" class="account-form__label">Type d'offre</label>
-                            <select id="admin-tier" name="type_compte" class="account-form__select">
-                                <option value="STANDARD" <?= !$isPremiumTier ? 'selected' : '' ?>>STANDARD (Plafond 2048 Mo)</option>
-                                <option value="PREMIUM" <?= $isPremiumTier ? 'selected' : '' ?>>PREMIUM (Jusqu'à 6144 Mo)</option>
-                            </select>
-                        </div>
-
-                        <div class="account-form__field">
-                            <label for="admin-ram" class="account-form__label">RAM maximale allouable (en Mo)</label>
-                            <input
-                                type="number"
-                                id="admin-ram"
-                                name="max_ram_allouable"
-                                min="512"
-                                max="6144"
-                                step="256"
-                                value="<?= (int) $userProfile['max_ram_allouable'] ?>"
-                                class="account-form__input"
-                            >
-                        </div>
-
-                        <div class="account-form__field account-form__field--checkbox">
-                            <input
-                                type="checkbox"
-                                id="admin-ban"
-                                name="est_banni"
-                                value="1"
-                                class="account-form__checkbox"
-                                <?= !empty($userProfile['est_banni']) ? 'checked' : '' ?>
-                            >
-                            <label for="admin-ban" class="account-form__checkbox-label">
-                                Suspendre / Bannir cet utilisateur de la plateforme
-                            </label>
-                        </div>
-
-                        <button type="submit" class="account-form__submit account-form__submit--warning">
-                            Appliquer les décisions de modération
-                        </button>
-                    </fieldset>
-                </form>
-            <?php endif; ?>
-
-            <details class="account__rgpd-box">
-                <summary class="account__rgpd-summary">Suppression du compte et Droit à l'oubli (RGPD)</summary>
-                <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="account-form account-form--danger">
-                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                    <input type="hidden" name="action" value="delete_account_rgpd">
-                    <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
-
-                    <p class="account-form__warning">
-                        Cette opération détruit définitivement vos informations personnelles et vos serveurs Minecraft. Choisissez le sort réservé à vos ressources publiées (Mods, Plugins, Modpacks) :
-                    </p>
-
-                    <fieldset class="account-form__fieldset">
-                        <legend class="account-form__legend">Devenir de mes créations publiées</legend>
-                        <div class="account-form__radio-group">
-                            <input
-                                type="radio"
-                                id="rgpd-anonymize"
-                                name="rgpd_resources_mode"
-                                value="anonymize"
-                                checked
-                                class="account-form__radio"
-                            >
-                            <label for="rgpd-anonymize" class="account-form__radio-label">
-                                <strong>Anonymiser mes créations :</strong> dissocier mon identité de mes Mods/Plugins/Modpacks afin que les serveurs de la communauté puissent continuer à les utiliser.
-                            </label>
-                        </div>
-                        <div class="account-form__radio-group">
-                            <input
-                                type="radio"
-                                id="rgpd-delete-all"
-                                name="rgpd_resources_mode"
-                                value="delete_all"
-                                class="account-form__radio"
-                            >
-                            <label for="rgpd-delete-all" class="account-form__radio-label">
-                                <strong>Supprimer intégralement mes créations :</strong> effacer tous mes fichiers versionnés et retirer mes ressources du catalogue Boötes.
-                            </label>
-                        </div>
-                    </fieldset>
-
-                    <div class="account-form__field">
-                        <label for="confirm-delete-input" class="account-form__label">
-                            Tapez <code>SUPPRIMER</code> en majuscules pour confirmer :
-                        </label>
-                        <input
-                            type="text"
-                            id="confirm-delete-input"
-                            name="confirm_delete_text"
-                            required
-                            pattern="SUPPRIMER"
-                            class="account-form__input"
-                        >
-                    </div>
-
-                    <button type="submit" class="account-form__submit account-form__submit--danger">
-                        Supprimer définitivement le compte
-                    </button>
-                </form>
-            </details>
-        </div>
-    </section>
-
-    <!-- 2. LISTE DE MES SERVEURS -->
+    <!-- 1. SERVEURS -->
     <section id="section-serveurs" class="account__section account__section--servers" aria-labelledby="heading-serveurs">
         <header class="account__section-header">
             <div class="account__section-heading">
-                <h2 id="heading-serveurs" class="account__section-title">Mes Serveurs Minecraft</h2>
-                <p class="account__section-desc">Instances dont vous êtes propriétaire ou co-administrateur.</p>
+                <h2 id="heading-serveurs" class="account__section-title">Mes serveurs Minecraft</h2>
+                <p class="account__section-desc">
+                    Serveurs dont vous êtes propriétaire ou co-administrateur &middot;
+                    offre <?= Security::e(View::label('offre', $userProfile['type_compte'])) ?> : <?= $maxServers ?> serveurs, <?= $ramCeiling ?> Mo de RAM.
+                </p>
             </div>
         </header>
 
-        <details class="account__create-server-drawer">
-            <summary class="account__btn account__btn--primary">Créer un serveur</summary>
-            <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="account-form account-form--server">
+        <details class="account__create-server"<?= empty($myServers) ? ' open' : '' ?>>
+            <summary class="account__create-toggle"><?= View::icon('plus') ?> Créer un serveur</summary>
+            <form action="<?= Security::e($sectionUrl('section-serveurs')) ?>" method="post" class="account-form account-form--server">
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="action" value="create_server">
                 <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
 
-                <div class="account-form__field">
-                    <label for="srv-nom" class="account-form__label">Nom du serveur</label>
-                    <input type="text" id="srv-nom" name="nom_serveur" minlength="3" maxlength="50" required class="account-form__input">
+                <div class="account-form__steps">
+                    <fieldset class="account-form__fieldset">
+                        <legend class="account-form__legend"><span class="account-form__step">1</span> Identité</legend>
+                        <div class="account-form__field">
+                            <label for="srv-nom" class="account-form__label">Nom du serveur</label>
+                            <input type="text" id="srv-nom" name="nom_serveur" minlength="3" maxlength="50" required class="account-form__input" placeholder="Ex. : Les bâtisseurs du vide">
+                        </div>
+                        <div class="account-form__field">
+                            <label for="srv-desc" class="account-form__label">Description publique</label>
+                            <textarea id="srv-desc" name="description" rows="3" maxlength="500" class="account-form__textarea" placeholder="Ce qui rend votre monde unique (500 caractères max)."></textarea>
+                        </div>
+                        <div class="account-form__field account-form__field--checkbox">
+                            <input type="checkbox" id="srv-public" name="est_public" value="1" checked class="account-form__checkbox">
+                            <label for="srv-public" class="account-form__checkbox-label">Afficher ce serveur dans l'annuaire public</label>
+                        </div>
+                    </fieldset>
+
+                    <fieldset class="account-form__fieldset">
+                        <legend class="account-form__legend"><span class="account-form__step">2</span> Jeu</legend>
+                        <div class="account-form__field">
+                            <label for="srv-version" class="account-form__label">Version de Minecraft</label>
+                            <select id="srv-version" name="version_mc" class="account-form__select">
+                                <?php foreach (ResourceManager::SUPPORTED_MC_VERSIONS as $mcVer): ?>
+                                    <option value="<?= Security::e($mcVer) ?>">Minecraft <?= Security::e($mcVer) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="account-form__field">
+                            <label for="srv-mode" class="account-form__label">Mode de jeu</label>
+                            <select id="srv-mode" name="mode_jeu" class="account-form__select">
+                                <?php foreach (ServerManager::GAME_MODES as $modeKey => $modeLabel): ?>
+                                    <option value="<?= Security::e($modeKey) ?>"><?= Security::e($modeLabel) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </fieldset>
+
+                    <fieldset class="account-form__fieldset">
+                        <legend class="account-form__legend"><span class="account-form__step">3</span> Ressources</legend>
+                        <div class="account-form__field">
+                            <label for="srv-ram" class="account-form__label">
+                                Mémoire RAM : <output for="srv-ram" class="account-form__output" data-range-output="srv-ram"><?= $ramDefault ?></output> Mo
+                            </label>
+                            <input type="range" id="srv-ram" name="ram_allouee" min="512" max="<?= $ramMax ?>" step="512" value="<?= $ramDefault ?>" required class="account-form__range">
+                            <small class="account-form__help">De 512 Mo à <?= $ramMax ?> Mo selon votre offre. Le total des serveurs en ligne ne peut pas dépasser votre quota.</small>
+                        </div>
+                        <div class="account-form__field">
+                            <label for="srv-slots" class="account-form__label">Joueurs maximum</label>
+                            <input type="number" id="srv-slots" name="slots_max" min="2" max="<?= ServerManager::MAX_SLOTS ?>" value="20" required class="account-form__input">
+                        </div>
+                    </fieldset>
                 </div>
 
-                <div class="account-form__field">
-                    <label for="srv-version" class="account-form__label">Version Minecraft</label>
-                    <select id="srv-version" name="version_mc" class="account-form__select">
-                        <?php foreach (ResourceManager::SUPPORTED_MC_VERSIONS as $mcVer): ?>
-                            <option value="<?= Security::e($mcVer) ?>">Minecraft <?= Security::e($mcVer) ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-
-                <div class="account-form__field">
-                    <label for="srv-mode" class="account-form__label">Mode de jeu</label>
-                    <select id="srv-mode" name="mode_jeu" class="account-form__select">
-                        <option value="SURVIE">Survie (Survival)</option>
-                        <option value="CREATIF">Créatif (Creative)</option>
-                        <option value="HARDCORE">Hardcore</option>
-                        <option value="AVENTURE">Aventure / Mini-jeux</option>
-                        <option value="MODDE">Survie Moddée</option>
-                    </select>
-                </div>
-
-                <div class="account-form__field">
-                    <label for="srv-ram" class="account-form__label">
-                        Mémoire RAM allouée (Plafond de votre offre : <?= (int) $userProfile['max_ram_allouable'] ?> Mo)
-                    </label>
-                    <input
-                        type="number"
-                        id="srv-ram"
-                        name="ram_allouee"
-                        min="512"
-                        max="<?= $isPremiumTier ? 6144 : 2048 ?>"
-                        step="512"
-                        value="2048"
-                        required
-                        class="account-form__input"
-                    >
-                </div>
-
-                <div class="account-form__field">
-                    <label for="srv-slots" class="account-form__label">Nombre de slots (joueurs max)</label>
-                    <input type="number" id="srv-slots" name="slots_max" min="2" max="100" value="20" required class="account-form__input">
-                </div>
-
-                <div class="account-form__field">
-                    <label for="srv-desc" class="account-form__label">Description publique</label>
-                    <textarea id="srv-desc" name="description" rows="2" maxlength="500" class="account-form__textarea"></textarea>
-                </div>
-
-                <div class="account-form__field account-form__field--checkbox">
-                    <input type="checkbox" id="srv-public" name="est_public" value="1" checked class="account-form__checkbox">
-                    <label for="srv-public" class="account-form__checkbox-label">Répertorier ce serveur dans l'annuaire public Boötes</label>
-                </div>
-
-                <button type="submit" class="account-form__submit">Déployer l'instance</button>
+                <button type="submit" class="account-form__submit"><?= View::icon('rocket') ?> Créer le serveur</button>
             </form>
         </details>
 
         <?php if (empty($myServers)): ?>
-            <p class="account__empty">Aucun serveur actif. Utilisez le bouton « Créer un serveur » ci-dessus pour lancer votre première instance.</p>
+            <p class="account__empty">Aucun serveur pour le moment : créez votre premier monde avec le formulaire ci-dessus.</p>
         <?php else: ?>
             <div class="account__server-list">
                 <?php foreach ($myServers as $srv): ?>
                     <?php
-                    $srvId   = (int) $srv['id_serveur'];
-                    $isOwner = (int) $srv['id_proprietaire'] === $targetUserId;
+                    $srvId      = (int) $srv['id_serveur'];
+                    $isOwner    = (int) $srv['id_proprietaire'] === $targetUserId;
+                    $srvSlots   = max(1, (int) $srv['slots_max']);
+                    $srvPlayers = min(max(0, (int) $srv['joueurs_connectes']), $srvSlots);
                     ?>
                     <article class="account-server-card">
                         <header class="account-server-card__header">
-                            <span class="account-server-card__status">
-                                <?= Security::e((string) $srv['statut']) ?>
-                            </span>
-                            <span class="account-server-card__role-badge">
-                                <?= $isOwner ? 'Propriétaire' : 'Co-Admin' ?>
-                            </span>
-                            <h3 class="account-server-card__title"><?= Security::e((string) $srv['nom_serveur']) ?></h3>
+                            <?= View::badge('statut_serveur', $srv['statut']) ?>
+                            <span class="account-server-card__role-badge"><?= $isOwner ? 'Propriétaire' : 'Co-admin' ?></span>
                         </header>
+                        <h3 class="account-server-card__title"><?= Security::e((string) $srv['nom_serveur']) ?></h3>
+                        <p class="account-server-card__meta">
+                            Minecraft <?= Security::e((string) $srv['version_mc']) ?> &middot; <?= Security::e(View::label('mode_jeu', $srv['mode_jeu'])) ?>
+                            <?php if ((int) ($srv['est_public'] ?? 1) !== 1): ?>&middot; privé<?php endif; ?>
+                        </p>
                         <dl class="account-server-card__specs">
-                            <div class="account-server-card__spec">
-                                <dt>Version &amp; Mode</dt>
-                                <dd>MC <?= Security::e((string) $srv['version_mc']) ?> (<?= Security::e((string) $srv['mode_jeu']) ?>)</dd>
-                            </div>
-                            <div class="account-server-card__spec">
-                                <dt>Port &amp; RAM</dt>
-                                <dd>:<?= (int) $srv['port'] ?> &bull; <?= (int) $srv['ram_allouee'] ?> Mo</dd>
-                            </div>
-                            <div class="account-server-card__spec">
-                                <dt>Joueurs</dt>
-                                <dd><?= (int) $srv['joueurs_connectes'] ?> / <?= (int) $srv['slots_max'] ?></dd>
-                            </div>
+                            <dt>Joueurs</dt>
+                            <dd><?= $srvPlayers ?> / <?= $srvSlots ?></dd>
+                            <dt>Mémoire</dt>
+                            <dd><?= (int) $srv['ram_allouee'] ?> Mo</dd>
+                            <dt>Port</dt>
+                            <dd><code><?= (int) $srv['port'] ?></code></dd>
                         </dl>
                         <footer class="account-server-card__footer">
-                            <a href="/serveur/dashboard?id=<?= $srvId ?>" class="account-server-card__btn account-server-card__btn--primary">
-                                Dashboard
-                            </a>
-                            <a href="/serveur/console?id=<?= $srvId ?>" class="account-server-card__btn">
-                                Console
-                            </a>
-                            <a href="/serveur-public?id=<?= $srvId ?>" class="account-server-card__btn">
-                                Fiche publique
-                            </a>
+                            <a href="/serveur/dashboard?id=<?= $srvId ?>" class="account-server-card__btn account-server-card__btn--primary"><?= View::icon('layout-dashboard') ?> Gérer</a>
+                            <a href="/serveur/console?id=<?= $srvId ?>" class="account-server-card__btn" title="Console"><?= View::icon('square-terminal') ?> Console</a>
+                            <a href="/serveur-public?id=<?= $srvId ?>" class="account-server-card__btn" title="Fiche publique"><?= View::icon('external-link') ?></a>
                         </footer>
                     </article>
                 <?php endforeach; ?>
             </div>
         <?php endif; ?>
+
+        <h3 class="account__subsection-title"><?= View::icon('heart') ?> Serveurs favoris <span class="tabs__count"><?= count($favoriteServers) ?></span></h3>
+        <?php if (empty($favoriteServers)): ?>
+            <p class="account__empty">Aucun favori : ajoutez des serveurs depuis leur fiche publique (bouton « Ajouter aux favoris »).</p>
+        <?php else: ?>
+            <div class="card-grid account__favorites">
+                <?php foreach ($favoriteServers as $fav): ?>
+                    <?php
+                    $card = [
+                        'id' => $fav['id_serveur'], 'name' => $fav['nom_serveur'], 'version' => $fav['version_mc'], 'mode' => $fav['mode_jeu'],
+                        'status' => $fav['statut'], 'players' => $fav['joueurs_connectes'], 'slots' => $fav['slots_max'],
+                        'description' => $fav['description'], 'owner' => $fav['proprietaire_pseudo'], 'rating' => $fav['note_moyenne'],
+                    ];
+                    require __DIR__ . '/../../includes/cards/server-card.php';
+                    ?>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
     </section>
 
-    <!-- 3. LISTE DE MES CRÉATIONS (MODS, MODPACKS, PLUGINS) -->
+    <!-- 2. CRÉATIONS -->
     <section id="section-creations" class="account__section account__section--creations" aria-labelledby="heading-creations">
         <header class="account__section-header">
             <div class="account__section-heading">
-                <h2 id="heading-creations" class="account__section-title">Mes Créations (Mods, Modpacks, Plugins)</h2>
-                <p class="account__section-desc">Gérez vos ressources publiées et suivez leurs statistiques d'adoption.</p>
+                <h2 id="heading-creations" class="account__section-title">Mes créations</h2>
+                <p class="account__section-desc">Mods, plugins et modpacks publiés, avec leur adoption par la communauté.</p>
             </div>
             <div class="account__section-actions">
-                <a href="/user/createur-edition?type=MOD" class="account__btn account__btn--primary">Créer un Mod</a>
-                <a href="/user/createur-edition?type=PLUGIN" class="account__btn account__btn--secondary">Créer un Plugin</a>
-                <a href="/user/createur-edition?type=MOD_PACK" class="account__btn account__btn--secondary">Créer un Modpack</a>
+                <a href="/user/createur-edition?type=MOD" class="account__btn account__btn--primary"><?= View::icon('puzzle') ?> Publier un mod</a>
+                <a href="/user/createur-edition?type=PLUGIN" class="account__btn account__btn--secondary"><?= View::icon('plug') ?> Un plugin</a>
+                <a href="/user/createur-edition?type=MOD_PACK" class="account__btn account__btn--secondary"><?= View::icon('boxes') ?> Un modpack</a>
             </div>
         </header>
 
         <?php if (empty($myCreations)): ?>
-            <p class="account__empty">Vous n'avez encore publié aucun Mod, Plugin ou Modpack.</p>
+            <p class="account__empty">Vous n'avez encore rien publié. Partagez votre premier mod, plugin ou modpack avec la communauté !</p>
         <?php else: ?>
-            <table class="creations-table">
-                <caption class="creations-table__caption">Ressources publiées par ce compte</caption>
-                <thead class="creations-table__head">
-                    <tr class="creations-table__row">
-                        <th scope="col" class="creations-table__cell">Nom</th>
-                        <th scope="col" class="creations-table__cell">Type</th>
-                        <th scope="col" class="creations-table__cell">Version MC</th>
-                        <th scope="col" class="creations-table__cell">Fichiers</th>
-                        <th scope="col" class="creations-table__cell">Téléchargements</th>
-                        <th scope="col" class="creations-table__cell">Note</th>
-                        <th scope="col" class="creations-table__cell">Statut</th>
-                        <th scope="col" class="creations-table__cell">Actions</th>
-                    </tr>
-                </thead>
-                <tbody class="creations-table__body">
-                    <?php foreach ($myCreations as $res): ?>
-                        <?php $resId = (int) $res['id_ressource']; ?>
+            <div class="table-wrap">
+                <table class="creations-table">
+                    <caption class="visually-hidden">Ressources publiées par ce compte</caption>
+                    <thead class="creations-table__head">
                         <tr class="creations-table__row">
-                            <th scope="row" class="creations-table__cell">
-                                <a href="/ressource-detail?id=<?= $resId ?>" class="creations-table__link">
-                                    <?= Security::e((string) $res['nom_ressource']) ?>
-                                </a>
-                            </th>
-                            <td class="creations-table__cell"><?= Security::e(ResourceManager::getTypeLabel((string) $res['type_ressource'])) ?></td>
-                            <td class="creations-table__cell">MC <?= Security::e((string) $res['version_compatible']) ?></td>
-                            <td class="creations-table__cell"><?= (int) $res['nb_versions'] ?> version(s)</td>
-                            <td class="creations-table__cell"><?= (int) $res['nb_telechargements'] ?></td>
-                            <td class="creations-table__cell"><?= round((float) $res['note_moyenne'], 1) ?> / 5 (<?= (int) $res['nb_avis'] ?>)</td>
-                            <td class="creations-table__cell"><?= Security::e((string) $res['statut_moderation']) ?></td>
-                            <td class="creations-table__cell creations-table__cell--actions">
-                                <a href="/user/createur-edition?id=<?= $resId ?>" class="creations-table__btn">Modifier</a>
-                                <a href="/user/createur-statistiques?id=<?= $resId ?>" class="creations-table__btn">Statistiques</a>
-                            </td>
+                            <th scope="col" class="creations-table__cell">Nom</th>
+                            <th scope="col" class="creations-table__cell">Type</th>
+                            <th scope="col" class="creations-table__cell">Minecraft</th>
+                            <th scope="col" class="creations-table__cell">Versions</th>
+                            <th scope="col" class="creations-table__cell">Téléchargements</th>
+                            <th scope="col" class="creations-table__cell">Note</th>
+                            <th scope="col" class="creations-table__cell">Statut</th>
+                            <th scope="col" class="creations-table__cell creations-table__cell--actions"><span class="visually-hidden">Actions</span></th>
                         </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
+                    </thead>
+                    <tbody class="creations-table__body">
+                        <?php foreach ($myCreations as $res): ?>
+                            <?php $resId = (int) $res['id_ressource']; ?>
+                            <tr class="creations-table__row">
+                                <th scope="row" class="creations-table__cell">
+                                    <a href="/ressource-detail?id=<?= $resId ?>" class="creations-table__link"><?= Security::e((string) $res['nom_ressource']) ?></a>
+                                </th>
+                                <td class="creations-table__cell"><?= Security::e(View::label('type_ressource', $res['type_ressource'])) ?></td>
+                                <td class="creations-table__cell"><?= Security::e((string) $res['version_compatible']) ?></td>
+                                <td class="creations-table__cell"><?= (int) $res['nb_versions'] ?></td>
+                                <td class="creations-table__cell"><?= View::number((int) $res['nb_telechargements']) ?></td>
+                                <td class="creations-table__cell">
+                                    <?php if ((int) $res['nb_avis'] > 0): ?>
+                                        <span class="rating"><?= View::icon('star') ?> <?= View::number((float) $res['note_moyenne'], 1) ?></span> <small>(<?= (int) $res['nb_avis'] ?>)</small>
+                                    <?php else: ?>
+                                        <small>Pas d'avis</small>
+                                    <?php endif; ?>
+                                </td>
+                                <td class="creations-table__cell"><?= View::badge('moderation', $res['statut_moderation']) ?></td>
+                                <td class="creations-table__cell creations-table__cell--actions">
+                                    <a href="/user/createur-edition?id=<?= $resId ?>" class="creations-table__btn"><?= View::icon('pencil') ?> Modifier</a>
+                                    <a href="/user/createur-statistiques?id=<?= $resId ?>" class="creations-table__btn"><?= View::icon('chart-column') ?> Statistiques</a>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
         <?php endif; ?>
     </section>
 
-    <!-- 4. GESTION DE LA LISTE D'AMIS -->
+    <!-- 3. AMIS -->
     <section id="section-amis" class="account__section account__section--friends" aria-labelledby="heading-amis">
-        <h2 id="heading-amis" class="account__section-title">Liste d'Amis et Relations</h2>
+        <header class="account__section-header">
+            <div class="account__section-heading">
+                <h2 id="heading-amis" class="account__section-title">Amis</h2>
+                <p class="account__section-desc">Retrouvez vos amis et invitez-les comme co-administrateurs de vos serveurs.</p>
+            </div>
+        </header>
 
-        <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="friend-add-form">
+        <form action="<?= Security::e($sectionUrl('section-amis')) ?>" method="post" class="friend-add-form">
             <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
             <input type="hidden" name="action" value="add_friend">
             <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
 
-            <label for="friend-pseudo-input" class="friend-add-form__label">Ajouter un ami par son pseudonyme :</label>
+            <label for="friend-pseudo-input" class="friend-add-form__label">Ajouter un ami par son pseudo</label>
             <div class="friend-add-form__controls">
-                <input
-                    type="text"
-                    id="friend-pseudo-input"
-                    name="friend_pseudo"
-                    placeholder="Ex : Steve_MC"
-                    minlength="3"
-                    maxlength="32"
-                    required
-                    class="friend-add-form__input"
-                >
-                <button type="submit" class="friend-add-form__submit">Envoyer une demande</button>
+                <div class="input-icon">
+                    <?= View::icon('user-plus', 'input-icon__icon') ?>
+                    <input type="text" id="friend-pseudo-input" name="friend_pseudo" placeholder="Ex. : Steve_MC" minlength="3" maxlength="32" required class="friend-add-form__input">
+                </div>
+                <button type="submit" class="friend-add-form__submit"><?= View::icon('send') ?> Envoyer la demande</button>
             </div>
         </form>
 
         <div class="friends-columns">
-            <article class="friends-panel" aria-labelledby="friends-pending-title">
-                <h3 id="friends-pending-title" class="friends-panel__title">
-                    Demandes en attente (<?= count($pendingReceived) ?> reçue(s), <?= count($pendingSent) ?> envoyée(s))
-                </h3>
+            <article class="friends-panel" aria-labelledby="friends-accepted-title">
+                <h3 id="friends-accepted-title" class="friends-panel__title">Mes amis <span class="tabs__count"><?= count($acceptedFriends) ?></span></h3>
+                <?php if (empty($acceptedFriends)): ?>
+                    <p class="friends-panel__empty">Votre liste d'amis est vide pour le moment.</p>
+                <?php else: ?>
+                    <ul class="friends-list">
+                        <?php foreach ($acceptedFriends as $friend): ?>
+                            <li class="friends-list__item">
+                                <span class="avatar" aria-hidden="true"><?= Security::e(View::initials($friend['friend_pseudo'])) ?></span>
+                                <span class="friends-list__name">
+                                    <strong><?= Security::e($friend['friend_pseudo']) ?></strong>
+                                    <small>ami depuis le <?= Security::e(View::date($friend['since'])) ?></small>
+                                </span>
+                                <form action="<?= Security::e($sectionUrl('section-amis')) ?>" method="post" class="friends-list__inline-form">
+                                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                                    <input type="hidden" name="action" value="remove_friend">
+                                    <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
+                                    <input type="hidden" name="friend_user_id" value="<?= $friend['friend_id'] ?>">
+                                    <button type="submit" class="friends-list__btn friends-list__btn--remove" title="Retirer de mes amis" data-confirm="Retirer <?= Security::e($friend['friend_pseudo']) ?> de vos amis ?">Retirer</button>
+                                </form>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                <?php endif; ?>
+            </article>
 
+            <article class="friends-panel" aria-labelledby="friends-pending-title">
+                <h3 id="friends-pending-title" class="friends-panel__title">Demandes en attente <span class="tabs__count"><?= count($pendingReceived) + count($pendingSent) ?></span></h3>
                 <?php if (empty($pendingReceived) && empty($pendingSent)): ?>
-                    <p class="friends-panel__empty">Aucune demande d'ami en attente.</p>
+                    <p class="friends-panel__empty">Aucune demande en attente.</p>
                 <?php else: ?>
                     <ul class="friends-list">
                         <?php foreach ($pendingReceived as $req): ?>
                             <li class="friends-list__item friends-list__item--incoming">
+                                <span class="avatar" aria-hidden="true"><?= Security::e(View::initials($req['friend_pseudo'])) ?></span>
                                 <span class="friends-list__name">
-                                    <strong><?= Security::e($req['friend_pseudo']) ?></strong> souhaite vous ajouter
+                                    <strong><?= Security::e($req['friend_pseudo']) ?></strong>
+                                    <small>souhaite devenir votre ami</small>
                                 </span>
                                 <div class="friends-list__actions">
-                                    <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="friends-list__inline-form">
+                                    <form action="<?= Security::e($sectionUrl('section-amis')) ?>" method="post" class="friends-list__inline-form">
                                         <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                         <input type="hidden" name="action" value="accept_friend">
                                         <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
                                         <input type="hidden" name="friend_user_id" value="<?= $req['friend_id'] ?>">
-                                        <button type="submit" class="friends-list__btn friends-list__btn--accept">Accepter</button>
+                                        <button type="submit" class="friends-list__btn friends-list__btn--accept"><?= View::icon('check') ?> Accepter</button>
                                     </form>
-                                    <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="friends-list__inline-form">
+                                    <form action="<?= Security::e($sectionUrl('section-amis')) ?>" method="post" class="friends-list__inline-form">
                                         <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                         <input type="hidden" name="action" value="remove_friend">
                                         <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
@@ -1082,10 +922,12 @@ $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCO
 
                         <?php foreach ($pendingSent as $sent): ?>
                             <li class="friends-list__item friends-list__item--outgoing">
+                                <span class="avatar" aria-hidden="true"><?= Security::e(View::initials($sent['friend_pseudo'])) ?></span>
                                 <span class="friends-list__name">
-                                    Invitation envoyée à <strong><?= Security::e($sent['friend_pseudo']) ?></strong>
+                                    <strong><?= Security::e($sent['friend_pseudo']) ?></strong>
+                                    <small>invitation envoyée <?= Security::e(View::ago($sent['date'])) ?></small>
                                 </span>
-                                <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="friends-list__inline-form">
+                                <form action="<?= Security::e($sectionUrl('section-amis')) ?>" method="post" class="friends-list__inline-form">
                                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="remove_friend">
                                     <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
@@ -1097,74 +939,53 @@ $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCO
                     </ul>
                 <?php endif; ?>
             </article>
-
-            <article class="friends-panel" aria-labelledby="friends-accepted-title">
-                <h3 id="friends-accepted-title" class="friends-panel__title">
-                    Amis acceptés (<?= count($acceptedFriends) ?>)
-                </h3>
-
-                <?php if (empty($acceptedFriends)): ?>
-                    <p class="friends-panel__empty">Votre liste d'amis est vide pour le moment.</p>
-                <?php else: ?>
-                    <ul class="friends-list">
-                        <?php foreach ($acceptedFriends as $friend): ?>
-                            <li class="friends-list__item">
-                                <span class="friends-list__name">
-                                    <strong><?= Security::e($friend['friend_pseudo']) ?></strong>
-                                    <small>(depuis le <?= Security::e($friend['since']) ?>)</small>
-                                </span>
-                                <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="friends-list__inline-form">
-                                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                                    <input type="hidden" name="action" value="remove_friend">
-                                    <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
-                                    <input type="hidden" name="friend_user_id" value="<?= $friend['friend_id'] ?>">
-                                    <button type="submit" class="friends-list__btn friends-list__btn--remove">Retirer</button>
-                                </form>
-                            </li>
-                        <?php endforeach; ?>
-                    </ul>
-                <?php endif; ?>
-            </article>
         </div>
     </section>
 
-    <!-- 5. SYSTÈME DE TICKETS / SUPPORT -->
+    <!-- 4. SUPPORT -->
     <section id="section-tickets" class="account__section account__section--tickets" aria-labelledby="heading-tickets">
-        <h2 id="heading-tickets" class="account__section-title">Support Technique et Tickets</h2>
+        <header class="account__section-header">
+            <div class="account__section-heading">
+                <h2 id="heading-tickets" class="account__section-title">Support</h2>
+                <p class="account__section-desc">Une question, un incident, une demande de passage à Premium ? L'équipe vous répond ici.</p>
+            </div>
+        </header>
 
-        <details class="ticket-creator">
-            <summary class="ticket-creator__summary">Ouvrir un nouveau ticket de support</summary>
-            <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="ticket-creator__form">
+        <?php $premiumRequest = ($_GET['demande'] ?? '') === 'premium'; ?>
+        <details class="ticket-creator"<?= empty($tickets) || $premiumRequest ? ' open' : '' ?>>
+            <summary class="ticket-creator__summary"><?= View::icon('plus') ?> Ouvrir un ticket</summary>
+            <form action="<?= Security::e($sectionUrl('section-tickets')) ?>" method="post" class="ticket-creator__form">
                 <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                 <input type="hidden" name="action" value="create_ticket">
                 <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
 
-                <div class="ticket-creator__field">
-                    <label for="tkt-sujet" class="ticket-creator__label">Sujet de votre demande</label>
-                    <input type="text" id="tkt-sujet" name="sujet" minlength="5" maxlength="120" required class="ticket-creator__input">
+                <div class="ticket-creator__row">
+                    <div class="ticket-creator__field">
+                        <label for="tkt-sujet" class="ticket-creator__label">Sujet</label>
+                        <input type="text" id="tkt-sujet" name="sujet" minlength="5" maxlength="120" required class="ticket-creator__input"<?= $premiumRequest ? ' value="Passage à l\'offre Premium"' : '' ?>>
+                    </div>
+                    <div class="ticket-creator__field">
+                        <label for="tkt-cat" class="ticket-creator__label">Catégorie</label>
+                        <select id="tkt-cat" name="categorie" class="ticket-creator__select">
+                            <option value="TECHNIQUE">Incident serveur / plantage</option>
+                            <option value="FACTURATION"<?= $premiumRequest ? ' selected' : '' ?>>Offre Premium et mémoire RAM</option>
+                            <option value="MODERATION">Catalogue, ressource, modération</option>
+                            <option value="RGPD">Données personnelles (RGPD)</option>
+                        </select>
+                    </div>
                 </div>
 
                 <div class="ticket-creator__field">
-                    <label for="tkt-cat" class="ticket-creator__label">Catégorie</label>
-                    <select id="tkt-cat" name="categorie" class="ticket-creator__select">
-                        <option value="TECHNIQUE">Incident serveur / Crash JVM</option>
-                        <option value="FACTURATION">Offre Premium &amp; Allocation RAM</option>
-                        <option value="MODERATION">Catalogue / Ressource / Modération</option>
-                        <option value="RGPD">Données personnelles (RGPD)</option>
-                    </select>
-                </div>
-
-                <div class="ticket-creator__field">
-                    <label for="tkt-msg" class="ticket-creator__label">Description détaillée</label>
+                    <label for="tkt-msg" class="ticket-creator__label">Votre message</label>
                     <textarea id="tkt-msg" name="message" rows="4" minlength="10" maxlength="3000" required class="ticket-creator__textarea"></textarea>
                 </div>
 
-                <button type="submit" class="ticket-creator__submit">Envoyer le ticket</button>
+                <button type="submit" class="ticket-creator__submit"><?= View::icon('send') ?> Envoyer le ticket</button>
             </form>
         </details>
 
         <?php if (empty($tickets)): ?>
-            <p class="account__empty">Aucun ticket de support enregistré.</p>
+            <p class="account__empty">Aucun ticket pour le moment.</p>
         <?php else: ?>
             <div class="ticket-list">
                 <?php foreach ($tickets as $tkt): ?>
@@ -1173,26 +994,26 @@ $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCO
                     $isClosed = strtoupper((string) $tkt['statut']) === 'FERME';
                     $messages = $ticketReplies[$tid] ?? [];
                     ?>
-                    <details class="ticket-item">
+                    <details class="ticket-item"<?= !$isClosed && count($tickets) === 1 ? ' open' : '' ?>>
                         <summary class="ticket-item__summary">
                             <span class="ticket-item__id">#<?= $tid ?></span>
                             <strong class="ticket-item__subject"><?= Security::e((string) $tkt['sujet']) ?></strong>
-                            <span class="ticket-item__category">[<?= Security::e((string) $tkt['categorie']) ?>]</span>
-                            <span class="ticket-item__status"><?= Security::e((string) $tkt['statut']) ?></span>
-                            <time class="ticket-item__date" datetime="<?= Security::e((string) $tkt['date_creation']) ?>">
-                                <?= Security::e((string) $tkt['date_creation']) ?>
-                            </time>
+                            <span class="ticket-item__category"><?= Security::e(View::label('categorie_ticket', $tkt['categorie'])) ?></span>
+                            <?= View::badge('ticket', $tkt['statut']) ?>
+                            <time class="ticket-item__date" datetime="<?= Security::e((string) $tkt['date_creation']) ?>"><?= Security::e(View::ago((string) $tkt['date_creation'])) ?></time>
                         </summary>
 
                         <div class="ticket-item__conversation">
                             <?php foreach ($messages as $m): ?>
-                                <article class="ticket-message">
+                                <?php $isStaff = in_array(strtoupper((string) $m['auteur_role']), ['ADMIN', 'SUPER_ADMIN'], true); ?>
+                                <article class="ticket-message<?= $isStaff ? ' ticket-message--staff' : '' ?>">
                                     <header class="ticket-message__header">
+                                        <span class="avatar" aria-hidden="true"><?= Security::e(View::initials((string) $m['auteur_pseudo'])) ?></span>
                                         <strong class="ticket-message__author"><?= Security::e((string) $m['auteur_pseudo']) ?></strong>
-                                        <span class="ticket-message__role">(<?= Security::e((string) $m['auteur_role']) ?>)</span>
-                                        <time class="ticket-message__time" datetime="<?= Security::e((string) $m['date_envoi']) ?>">
-                                            <?= Security::e((string) $m['date_envoi']) ?>
-                                        </time>
+                                        <?php if ($isStaff): ?>
+                                            <span class="badge badge--accent">Équipe Boötes</span>
+                                        <?php endif; ?>
+                                        <time class="ticket-message__time" datetime="<?= Security::e((string) $m['date_envoi']) ?>"><?= Security::e(View::date((string) $m['date_envoi'], true)) ?></time>
                                     </header>
                                     <p class="ticket-message__body"><?= nl2br(Security::e((string) $m['contenu'])) ?></p>
                                 </article>
@@ -1201,31 +1022,23 @@ $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCO
 
                         <?php if (!$isClosed): ?>
                             <div class="ticket-item__actions">
-                                <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="ticket-item__reply-form">
+                                <form action="<?= Security::e($sectionUrl('section-tickets')) ?>" method="post" class="ticket-item__reply-form">
                                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="reply_ticket">
                                     <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
                                     <input type="hidden" name="ticket_id" value="<?= $tid ?>">
 
-                                    <label for="reply-msg-<?= $tid ?>" class="ticket-item__reply-label">Ajouter une réponse :</label>
-                                    <textarea
-                                        id="reply-msg-<?= $tid ?>"
-                                        name="message"
-                                        rows="2"
-                                        minlength="2"
-                                        maxlength="3000"
-                                        required
-                                        class="ticket-item__reply-textarea"
-                                    ></textarea>
-                                    <button type="submit" class="ticket-item__btn ticket-item__btn--reply">Répondre</button>
+                                    <label for="reply-msg-<?= $tid ?>" class="ticket-item__reply-label">Votre réponse</label>
+                                    <textarea id="reply-msg-<?= $tid ?>" name="message" rows="2" minlength="2" maxlength="3000" required class="ticket-item__reply-textarea"></textarea>
+                                    <button type="submit" class="ticket-item__btn ticket-item__btn--reply"><?= View::icon('reply') ?> Répondre</button>
                                 </form>
 
-                                <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="ticket-item__close-form">
+                                <form action="<?= Security::e($sectionUrl('section-tickets')) ?>" method="post" class="ticket-item__close-form">
                                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="close_ticket">
                                     <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
                                     <input type="hidden" name="ticket_id" value="<?= $tid ?>">
-                                    <button type="submit" class="ticket-item__btn ticket-item__btn--close">Clôturer le ticket</button>
+                                    <button type="submit" class="ticket-item__btn ticket-item__btn--close"><?= View::icon('circle-check') ?> Marquer comme résolu</button>
                                 </form>
                             </div>
                         <?php endif; ?>
@@ -1233,5 +1046,139 @@ $isPremiumTier = strtoupper((string) $userProfile['type_compte']) === Auth::ACCO
                 <?php endforeach; ?>
             </div>
         <?php endif; ?>
+    </section>
+
+    <!-- 5. PROFIL ET SÉCURITÉ -->
+    <section id="section-profil" class="account__section account__section--profile" aria-labelledby="heading-profil">
+        <header class="account__section-header">
+            <div class="account__section-heading">
+                <h2 id="heading-profil" class="account__section-title">Profil et sécurité</h2>
+                <p class="account__section-desc">Identifiants de connexion, mot de passe et données personnelles.</p>
+            </div>
+        </header>
+
+        <div class="account__profile-grid">
+            <form action="<?= Security::e($sectionUrl('section-profil')) ?>" method="post" class="account-form account-form--identity">
+                <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                <input type="hidden" name="action" value="update_profile">
+                <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
+
+                <fieldset class="account-form__fieldset">
+                    <legend class="account-form__legend">Identifiants et mot de passe</legend>
+
+                    <div class="account-form__field">
+                        <label for="profile-pseudo" class="account-form__label">Pseudo</label>
+                        <input type="text" id="profile-pseudo" name="pseudo" value="<?= Security::e((string) $userProfile['pseudo']) ?>" minlength="3" maxlength="32" required class="account-form__input">
+                    </div>
+
+                    <div class="account-form__field">
+                        <label for="profile-email" class="account-form__label">Adresse e-mail</label>
+                        <input type="email" id="profile-email" name="email" value="<?= Security::e((string) $userProfile['email']) ?>" required class="account-form__input">
+                    </div>
+
+                    <div class="account-form__field">
+                        <label for="profile-new-pwd" class="account-form__label">Nouveau mot de passe <small>(laisser vide pour le conserver)</small></label>
+                        <div class="input-icon password-field">
+                            <?= View::icon('key-round', 'input-icon__icon') ?>
+                            <input type="password" id="profile-new-pwd" name="new_password" minlength="10" autocomplete="new-password" class="account-form__input">
+                            <button type="button" class="password-field__toggle" data-password-toggle aria-label="Afficher le mot de passe" aria-pressed="false" hidden>
+                                <?= View::icon('eye', 'password-field__show') ?>
+                                <?= View::icon('eye-off', 'password-field__hide') ?>
+                            </button>
+                        </div>
+                    </div>
+
+                    <?php if (!$isAdminView): ?>
+                        <div class="account-form__field">
+                            <label for="profile-current-pwd" class="account-form__label">Mot de passe actuel <small>(requis pour valider)</small></label>
+                            <div class="input-icon">
+                                <?= View::icon('lock', 'input-icon__icon') ?>
+                                <input type="password" id="profile-current-pwd" name="current_password" required autocomplete="current-password" class="account-form__input">
+                            </div>
+                        </div>
+                    <?php endif; ?>
+
+                    <button type="submit" class="account-form__submit"><?= View::icon('save') ?> Enregistrer</button>
+                </fieldset>
+            </form>
+
+            <?php if ($isAdminView && Auth::isAdmin()): ?>
+                <form action="<?= Security::e($sectionUrl('section-profil')) ?>" method="post" class="account-form account-form--moderation">
+                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                    <input type="hidden" name="action" value="admin_update_account">
+                    <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
+
+                    <fieldset class="account-form__fieldset">
+                        <legend class="account-form__legend">Modération et quotas</legend>
+
+                        <div class="account-form__field">
+                            <label for="admin-tier" class="account-form__label">Offre</label>
+                            <select id="admin-tier" name="type_compte" class="account-form__select">
+                                <option value="STANDARD" <?= !$isPremiumTier ? 'selected' : '' ?>>Standard (2 048 Mo max)</option>
+                                <option value="PREMIUM" <?= $isPremiumTier ? 'selected' : '' ?>>Premium (jusqu'à 6 144 Mo)</option>
+                            </select>
+                        </div>
+
+                        <div class="account-form__field">
+                            <label for="admin-ram" class="account-form__label">RAM maximale allouable (Mo)</label>
+                            <input type="number" id="admin-ram" name="max_ram_allouable" min="512" max="6144" step="256" value="<?= (int) $userProfile['max_ram_allouable'] ?>" class="account-form__input">
+                        </div>
+
+                        <div class="account-form__field account-form__field--checkbox">
+                            <input type="checkbox" id="admin-ban" name="est_banni" value="1" class="account-form__checkbox" <?= !empty($userProfile['est_banni']) ? 'checked' : '' ?>>
+                            <label for="admin-ban" class="account-form__checkbox-label">Suspendre ce compte (bannissement)</label>
+                        </div>
+
+                        <button type="submit" class="account-form__submit account-form__submit--warning"><?= View::icon('gavel') ?> Appliquer</button>
+                    </fieldset>
+                </form>
+            <?php endif; ?>
+
+            <details class="account__rgpd-box">
+                <summary class="account__rgpd-summary"><?= View::icon('trash-2') ?> Supprimer le compte (droit à l'oubli, RGPD)</summary>
+                <form action="<?= Security::e($formTargetUrl) ?>" method="post" class="account-form account-form--danger">
+                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                    <input type="hidden" name="action" value="delete_account_rgpd">
+                    <input type="hidden" name="target_user_id" value="<?= $targetUserId ?>">
+
+                    <p class="account-form__warning">
+                        Cette opération supprime définitivement les informations personnelles et les serveurs Minecraft du compte.
+                        Choisissez le sort des ressources publiées :
+                    </p>
+
+                    <fieldset class="account-form__fieldset">
+                        <legend class="account-form__legend">Devenir des créations publiées</legend>
+                        <div class="account-form__radio-group">
+                            <input type="radio" id="rgpd-anonymize" name="rgpd_resources_mode" value="anonymize" checked class="account-form__radio">
+                            <label for="rgpd-anonymize" class="account-form__radio-label">
+                                <strong>Les anonymiser</strong> : elles restent disponibles pour les serveurs de la communauté, sans lien avec votre identité.
+                            </label>
+                        </div>
+                        <div class="account-form__radio-group">
+                            <input type="radio" id="rgpd-delete-all" name="rgpd_resources_mode" value="delete_all" class="account-form__radio">
+                            <label for="rgpd-delete-all" class="account-form__radio-label">
+                                <strong>Les supprimer</strong> : tous les fichiers versionnés sont effacés et retirés du catalogue.
+                            </label>
+                        </div>
+                    </fieldset>
+
+                    <div class="account-form__field">
+                        <label for="confirm-delete-input" class="account-form__label">Tapez <code>SUPPRIMER</code> pour confirmer</label>
+                        <input type="text" id="confirm-delete-input" name="confirm_delete_text" required pattern="SUPPRIMER" class="account-form__input">
+                    </div>
+
+                    <?php if (!$isAdminView): ?>
+                        <div class="account-form__field">
+                            <label for="confirm-delete-password" class="account-form__label">Mot de passe actuel</label>
+                            <input type="password" id="confirm-delete-password" name="current_password" required autocomplete="current-password" class="account-form__input">
+                        </div>
+                    <?php endif; ?>
+
+                    <button type="submit" class="account-form__submit account-form__submit--danger" data-confirm="Supprimer définitivement ce compte et toutes ses données ? Cette action est irréversible.">
+                        Supprimer définitivement le compte
+                    </button>
+                </form>
+            </details>
+        </div>
     </section>
 </div>

@@ -4,9 +4,14 @@ declare(strict_types=1);
 
 use Bootes\Config\Database;
 use Bootes\Src\Auth;
+use Bootes\Src\Http;
+use Bootes\Src\RateLimiter;
+use Bootes\Src\ResourceManager;
 use Bootes\Src\Security;
+use Bootes\Src\View;
 
-$db = $db ?? Database::getInstance();
+$db              = $db ?? Database::getInstance();
+$resourceManager = new ResourceManager($db);
 
 $resourceId    = Security::validatePositiveInt($_GET['id'] ?? $_POST['resource_id'] ?? null);
 $currentUserId = Auth::getUserId();
@@ -66,6 +71,20 @@ if ($resource === null) {
 
 $isCreator   = $currentUserId !== null && $currentUserId === (int) $resource['id_auteur'];
 $canModerate = $isCreator || Auth::isAdmin();
+$isAvailable = ResourceManager::isPubliclyAvailable($resource);
+
+// Une ressource en attente ou suspendue n'est visible que de son auteur et des administrateurs.
+if (!$isAvailable && !$canModerate) {
+    http_response_code(404);
+    ?>
+    <section class="resource-detail resource-detail--not-found">
+        <h1 class="resource-detail__title">Ressource indisponible</h1>
+        <p class="resource-detail__message">Ce mod, plugin ou modpack n'existe pas ou a été retiré du catalogue par la modération.</p>
+        <a href="/catalogue" class="resource-detail__back-link">Retourner au catalogue</a>
+    </section>
+    <?php
+    return;
+}
 
 // Traitement des formulaires POST (Téléchargement, Installation sur serveur, Avis, Signalement, Modération)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -74,32 +93,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!Security::verifyCsrfToken($postCsrf)) {
         $feedbackError = 'Jeton CSRF invalide. Veuillez recharger la page.';
+    } elseif (!$isAvailable && in_array($action, ['install_on_server', 'add_review', 'report'], true)) {
+        $feedbackError = 'Cette ressource n\'est pas validée : action indisponible.';
     } else {
         try {
             if ($action === 'download') {
-                $upd = $db->prepare('UPDATE RESSOURCE SET nb_telechargements = nb_telechargements + 1 WHERE id_ressource = :id');
-                $upd->execute([':id' => $resourceId]);
-                $resource['nb_telechargements'] = (int) $resource['nb_telechargements'] + 1;
-                $feedbackMessage = 'Téléchargement de la ressource lancé.';
+                $latestFile = $resourceManager->getLatestVersionFile($resourceId);
+                $filePath   = $latestFile !== null ? $resourceManager->resolveStoredFile((string) $latestFile['chemin_fichier']) : null;
+
+                if ($latestFile === null || $filePath === null) {
+                    $feedbackError = 'Aucun fichier n\'est encore disponible au téléchargement pour cette ressource.';
+                } else {
+                    $resourceManager->registerDownload($resourceId, (int) $latestFile['id_fichier']);
+                    $extension = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+                    Http::sendFile(
+                        $filePath,
+                        (string) $latestFile['nom_fichier'],
+                        ResourceManager::ALLOWED_ARCHIVE_EXTENSIONS[$extension] ?? 'application/octet-stream'
+                    );
+                }
             } elseif ($action === 'install_on_server' && $currentUserId !== null) {
                 $targetServerId = Security::validatePositiveInt($_POST['target_server_id'] ?? null);
-                if ($targetServerId !== null && Auth::canManageServer($currentUserId, $targetServerId, $db)) {
-                    $installStmt = $db->prepare('
-                        INSERT INTO INSTALLER_RESSOURCE (id_serveur, id_ressource, date_installation)
-                        VALUES (:server_id, :res_id, NOW())
-                        ON DUPLICATE KEY UPDATE date_installation = NOW()
-                    ');
-                    $installStmt->execute([
-                        ':server_id' => $targetServerId,
-                        ':res_id'    => $resourceId,
-                    ]);
-                    $upd = $db->prepare('UPDATE RESSOURCE SET nb_telechargements = nb_telechargements + 1 WHERE id_ressource = :id');
-                    $upd->execute([':id' => $resourceId]);
-                    $resource['nb_telechargements'] = (int) $resource['nb_telechargements'] + 1;
-                    $feedbackMessage = sprintf('La ressource a été installée avec succès sur votre serveur #%d.', $targetServerId);
+                if ($targetServerId !== null && Auth::canManageServer($currentUserId, $targetServerId, $db, Auth::SERVER_PERM_FULL)) {
+                    $install = $resourceManager->installOnServer($targetServerId, $resourceId);
+                    if ($install['success']) {
+                        $feedbackMessage = sprintf('La ressource a été installée avec succès sur votre serveur #%d.', $targetServerId);
+                    } else {
+                        $feedbackError = $install['message'];
+                    }
                 } else {
-                    $feedbackError = 'Vous n\'avez pas les droits nécessaires sur le serveur sélectionné.';
+                    $feedbackError = 'Vous n\'avez pas les droits nécessaires (niveau COMPLET) sur le serveur sélectionné.';
                 }
+            } elseif ($action === 'add_review' && $currentUserId !== null && $isCreator) {
+                $feedbackError = 'Vous ne pouvez pas évaluer votre propre ressource.';
             } elseif ($action === 'add_review' && $currentUserId !== null) {
                 $note        = Security::validatePositiveInt($_POST['note'] ?? null);
                 $commentaire = Security::validateString($_POST['commentaire'] ?? '', 5, 1000);
@@ -123,8 +149,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif ($action === 'report' && $currentUserId !== null) {
                 $motif       = Security::validateString($_POST['motif'] ?? '', 3, 100);
                 $description = Security::validateString($_POST['description_signalement'] ?? '', 10, 1000);
+                $reportKey   = 'report:user:' . $currentUserId;
+                $limiter     = RateLimiter::default();
 
-                if ($motif === null || $description === null) {
+                if ($limiter->tooManyAttempts($reportKey, 10)) {
+                    $feedbackError = 'Vous avez envoyé trop de signalements récemment. Réessayez plus tard.';
+                } elseif ($motif === null || $description === null) {
                     $feedbackError = 'Veuillez préciser un motif et détailler votre signalement (10 caractères minimum).';
                 } else {
                     $reportStmt = $db->prepare('
@@ -139,6 +169,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ':description' => $description,
                         ':statut'      => 'EN_ATTENTE',
                     ]);
+                    $limiter->hit($reportKey, 3600);
                     $feedbackMessage = 'Signalement transmis à l\'équipe de modération Boötes.';
                 }
             } elseif ($action === 'moderate_delete' && $canModerate) {
@@ -211,8 +242,27 @@ if ($currentUserId !== null) {
         error_log(sprintf('[Boötes][RessourceDetail] Info serveurs utilisateur : %s', $e->getMessage()));
     }
 }
+
+// Données de présentation
+$typeKey      = strtoupper((string) $resource['type_ressource']);
+$typeTone     = match ($typeKey) {
+    'PLUGIN'              => 'plugin',
+    'MOD_PACK', 'MODPACK' => 'modpack',
+    default               => 'mod',
+};
+$typeIcon     = ['mod' => 'puzzle', 'plugin' => 'plug', 'modpack' => 'boxes'][$typeTone];
+$latestFile   = $versionsList[0] ?? null;
+$canReview    = Auth::isLogged() && !$isCreator && $isAvailable;
+$baseUrl      = '/ressource-detail?id=' . $resourceId;
+$ratingCounts = array_fill(1, 5, 0);
+foreach ($reviews as $rev) {
+    $note = (int) $rev['note'];
+    if ($note >= 1 && $note <= 5) {
+        $ratingCounts[$note]++;
+    }
+}
 ?>
-<article class="resource-detail" aria-labelledby="resource-main-title">
+<article class="resource-detail resource-detail--<?= $typeTone ?>" aria-labelledby="resource-main-title">
     <?php if ($feedbackMessage !== null): ?>
         <div class="resource-detail__alert resource-detail__alert--success" role="status">
             <p><?= Security::e($feedbackMessage) ?></p>
@@ -226,97 +276,179 @@ if ($currentUserId !== null) {
     <?php endif; ?>
 
     <header class="resource-detail__header">
-        <div class="resource-detail__heading">
-            <span class="resource-detail__badge">
-                <?= Security::e(strtoupper((string) $resource['type_ressource'])) ?>
-            </span>
-            <span class="resource-detail__mc-version">
-                Minecraft <?= Security::e((string) $resource['version_compatible']) ?>
-            </span>
-            <h1 id="resource-main-title" class="resource-detail__title">
-                <?= Security::e((string) $resource['nom_ressource']) ?>
-            </h1>
-            <p class="resource-detail__byline">
-                Publié par <strong><?= Security::e((string) $resource['auteur_pseudo']) ?></strong>
-                le <time datetime="<?= Security::e((string) $resource['date_publication']) ?>">
-                    <?= Security::e((string) $resource['date_publication']) ?>
-                </time>
-            </p>
+        <div class="resource-detail__chips">
+            <span class="type-chip type-chip--<?= $typeTone ?>"><?= View::icon($typeIcon) ?> <?= Security::e(View::label('type_ressource', $typeKey)) ?></span>
+            <span class="badge"><?= View::icon('box') ?> Minecraft <?= Security::e((string) $resource['version_compatible']) ?></span>
+            <?php if (!$isAvailable): ?>
+                <?= View::badge('moderation', $resource['statut_moderation']) ?>
+            <?php endif; ?>
         </div>
-
-        <dl class="resource-detail__stats">
-            <div class="resource-detail__stat-item">
-                <dt class="resource-detail__stat-label">Téléchargements</dt>
-                <dd class="resource-detail__stat-value"><?= (int) $resource['nb_telechargements'] ?></dd>
-            </div>
-            <div class="resource-detail__stat-item">
-                <dt class="resource-detail__stat-label">Note moyenne</dt>
-                <dd class="resource-detail__stat-value"><?= Security::e((string) $averageRating) ?> / 5 (<?= count($reviews) ?> avis)</dd>
-            </div>
-            <div class="resource-detail__stat-item">
-                <dt class="resource-detail__stat-label">Statut</dt>
-                <dd class="resource-detail__stat-value"><?= Security::e((string) $resource['statut_moderation']) ?></dd>
-            </div>
-        </dl>
+        <h1 id="resource-main-title" class="resource-detail__title"><?= Security::e((string) $resource['nom_ressource']) ?></h1>
+        <?php if (!empty($resource['resume'])): ?>
+            <p class="resource-detail__lead"><?= Security::e((string) $resource['resume']) ?></p>
+        <?php endif; ?>
+        <div class="resource-detail__byline">
+            <span class="avatar" aria-hidden="true"><?= Security::e(View::initials((string) $resource['auteur_pseudo'])) ?></span>
+            <span>
+                par <strong><?= Security::e((string) $resource['auteur_pseudo']) ?></strong>
+                &middot; publié le <time datetime="<?= Security::e((string) $resource['date_publication']) ?>"><?= Security::e(View::date((string) $resource['date_publication'])) ?></time>
+            </span>
+            <?php if (!empty($reviews)): ?>
+                <a href="#avis" class="resource-detail__rating">
+                    <?= View::stars($averageRating) ?>
+                    <?= View::number($averageRating, 1) ?> &middot; <?= count($reviews) ?> avis
+                </a>
+            <?php endif; ?>
+        </div>
     </header>
 
-    <?php if ($canModerate): ?>
-        <aside class="resource-detail__moderation" aria-label="Outils d'administration et du créateur">
-            <h2 class="resource-detail__moderation-title">Gestion Créateur / Modération</h2>
-            <div class="resource-detail__moderation-actions">
-                <a href="/user/createur-edition?id=<?= $resourceId ?>" class="resource-detail__btn resource-detail__btn--edit">
-                    Modifier la ressource
-                </a>
-                <a href="/user/createur-statistiques?id=<?= $resourceId ?>" class="resource-detail__btn resource-detail__btn--stats">
-                    Voir les statistiques détaillées
-                </a>
-                <form action="/ressource-detail?id=<?= $resourceId ?>" method="post" class="resource-detail__inline-form">
+    <div class="resource-detail__layout">
+        <div class="resource-detail__main" data-tabs>
+            <nav class="tabs__list" aria-label="Sections de la fiche" data-tablist>
+                <a href="#description" class="tabs__tab" data-tab><?= View::icon('file-text') ?> Description</a>
+                <a href="#versions" class="tabs__tab" data-tab><?= View::icon('history') ?> Versions <span class="tabs__count"><?= count($versionsList) ?></span></a>
+                <a href="#avis" class="tabs__tab" data-tab><?= View::icon('star') ?> Avis <span class="tabs__count"><?= count($reviews) ?></span></a>
+            </nav>
+
+            <section id="description" class="resource-detail__panel" aria-labelledby="desc-heading">
+                <h2 id="desc-heading" class="resource-detail__panel-title">Description</h2>
+                <div class="resource-detail__content">
+                    <p><?= nl2br(Security::e((string) $resource['description'])) ?></p>
+                </div>
+            </section>
+
+            <section id="versions" class="resource-detail__panel" aria-labelledby="versions-heading">
+                <h2 id="versions-heading" class="resource-detail__panel-title">Fichiers et versions</h2>
+                <?php if (empty($versionsList)): ?>
+                    <p class="resource-detail__info">
+                        Aucun fichier publié pour l'instant. Version de Minecraft visée : <strong><?= Security::e((string) $resource['version_compatible']) ?></strong>.
+                    </p>
+                <?php else: ?>
+                    <div class="table-wrap">
+                        <table class="versions-table">
+                            <caption class="visually-hidden">Historique des versions de la ressource</caption>
+                            <thead class="versions-table__head">
+                                <tr class="versions-table__row">
+                                    <th scope="col" class="versions-table__cell">Version</th>
+                                    <th scope="col" class="versions-table__cell">Minecraft</th>
+                                    <th scope="col" class="versions-table__cell">Fichier</th>
+                                    <th scope="col" class="versions-table__cell">Taille</th>
+                                    <th scope="col" class="versions-table__cell">Publiée le</th>
+                                </tr>
+                            </thead>
+                            <tbody class="versions-table__body">
+                                <?php foreach ($versionsList as $index => $ver): ?>
+                                    <tr class="versions-table__row">
+                                        <td class="versions-table__cell">
+                                            <strong><?= Security::e((string) $ver['numero_version']) ?></strong>
+                                            <?php if ($index === 0): ?>
+                                                <span class="badge badge--success">Dernière</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td class="versions-table__cell"><?= Security::e((string) $ver['version_mc']) ?></td>
+                                        <td class="versions-table__cell"><code><?= Security::e((string) $ver['nom_fichier']) ?></code></td>
+                                        <td class="versions-table__cell"><?= Security::e(View::fileSize((int) $ver['taille_octets'])) ?></td>
+                                        <td class="versions-table__cell"><?= Security::e(View::date((string) $ver['date_ajout'])) ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php endif; ?>
+            </section>
+
+            <section id="avis" class="resource-detail__panel" aria-labelledby="reviews-heading">
+                <h2 id="reviews-heading" class="resource-detail__panel-title">Avis de la communauté</h2>
+
+                <div class="review-summary">
+                    <div class="review-summary__score">
+                        <p class="review-summary__value"><?= !empty($reviews) ? View::number($averageRating, 1) : '—' ?></p>
+                        <?= View::stars($averageRating) ?>
+                        <p class="review-summary__count"><?= count($reviews) ?> avis</p>
+                    </div>
+                    <dl class="rating-bars">
+                        <?php for ($star = 5; $star >= 1; $star--): ?>
+                            <dt class="rating-bars__label"><?= $star ?> <?= View::icon('star') ?></dt>
+                            <dd class="rating-bars__value">
+                                <meter class="rating-bars__meter" min="0" max="<?= max(1, count($reviews)) ?>" value="<?= $ratingCounts[$star] ?>"
+                                       aria-label="<?= $ratingCounts[$star] ?> avis à <?= $star ?> étoile<?= $star > 1 ? 's' : '' ?>"></meter>
+                            </dd>
+                        <?php endfor; ?>
+                    </dl>
+                </div>
+
+                <?php if ($canReview): ?>
+                    <form action="<?= Security::e($baseUrl) ?>#avis" method="post" class="review-form">
+                        <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                        <input type="hidden" name="action" value="add_review">
+                        <?php
+                        $starInputName = 'note';
+                        $starInputId   = 'review-note';
+                        require __DIR__ . '/../../includes/star-input.php';
+                        ?>
+                        <div class="review-form__field">
+                            <label for="review-comment" class="review-form__label">Votre avis</label>
+                            <textarea id="review-comment" name="commentaire" rows="3" minlength="5" maxlength="1000" required
+                                      class="review-form__textarea" placeholder="Qu'avez-vous pensé de cette création ?"></textarea>
+                        </div>
+                        <button type="submit" class="review-form__submit"><?= View::icon('send') ?> Publier mon avis</button>
+                    </form>
+                <?php elseif ($isCreator): ?>
+                    <p class="resource-detail__info">Vous êtes l'auteur de cette ressource : vous ne pouvez pas l'évaluer.</p>
+                <?php elseif (!Auth::isLogged()): ?>
+                    <p class="resource-detail__info"><a href="/auth?mode=login">Connectez-vous</a> pour donner votre avis.</p>
+                <?php endif; ?>
+
+                <?php if (empty($reviews)): ?>
+                    <p class="resource-detail__no-review">Aucun avis pour le moment : soyez le premier à partager votre expérience.</p>
+                <?php else: ?>
+                    <div class="review-list">
+                        <?php foreach ($reviews as $rev): ?>
+                            <article class="review-card">
+                                <header class="review-card__header">
+                                    <span class="avatar" aria-hidden="true"><?= Security::e(View::initials((string) $rev['pseudo'])) ?></span>
+                                    <strong class="review-card__author"><?= Security::e((string) $rev['pseudo']) ?></strong>
+                                    <?= View::stars((int) $rev['note']) ?>
+                                    <time class="review-card__date" datetime="<?= Security::e((string) $rev['date_avis']) ?>" title="<?= Security::e(View::date((string) $rev['date_avis'], true)) ?>">
+                                        <?= Security::e(View::ago((string) $rev['date_avis'])) ?>
+                                    </time>
+                                </header>
+                                <p class="review-card__comment"><?= Security::e((string) $rev['commentaire']) ?></p>
+                            </article>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </section>
+        </div>
+
+        <div class="resource-detail__aside">
+            <section class="resource-detail__card resource-detail__card--download" aria-labelledby="download-heading">
+                <h2 id="download-heading" class="resource-detail__card-title">Télécharger</h2>
+                <form action="<?= Security::e($baseUrl) ?>" method="post" class="resource-detail__download-form">
                     <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                    <input type="hidden" name="action" value="moderate_delete">
-                    <button type="submit" class="resource-detail__btn resource-detail__btn--danger">
-                        Suspendre / Retirer du catalogue
+                    <input type="hidden" name="action" value="download">
+                    <button type="submit" class="resource-detail__btn resource-detail__btn--primary" <?= $latestFile === null ? 'disabled' : '' ?>>
+                        <?= View::icon('download') ?> <?= $latestFile === null ? 'Aucun fichier publié' : 'Télécharger' ?>
                     </button>
                 </form>
-            </div>
-        </aside>
-    <?php endif; ?>
+                <?php if ($latestFile !== null): ?>
+                    <p class="resource-detail__file">
+                        <code><?= Security::e((string) $latestFile['nom_fichier']) ?></code>
+                        Version <?= Security::e((string) $latestFile['numero_version']) ?> &middot; <?= Security::e(View::fileSize((int) $latestFile['taille_octets'])) ?>
+                    </p>
+                <?php endif; ?>
 
-    <div class="resource-detail__body">
-        <section class="resource-detail__description-section" aria-labelledby="desc-heading">
-            <h2 id="desc-heading" class="resource-detail__section-title">Description complète</h2>
-            <?php if (!empty($resource['resume'])): ?>
-                <p class="resource-detail__lead"><?= Security::e((string) $resource['resume']) ?></p>
-            <?php endif; ?>
-            <div class="resource-detail__content">
-                <p><?= nl2br(Security::e((string) $resource['description'])) ?></p>
-            </div>
-        </section>
-
-        <section class="resource-detail__install-section" aria-labelledby="install-heading">
-            <h2 id="install-heading" class="resource-detail__section-title">Téléchargement et déploiement</h2>
-
-            <form action="/ressource-detail?id=<?= $resourceId ?>" method="post" class="resource-detail__download-form">
-                <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                <input type="hidden" name="action" value="download">
-                <button type="submit" class="resource-detail__btn resource-detail__btn--primary">
-                    Télécharger l'archive (<?= Security::e((string) ($resource['chemin_fichier'] ?: 'Dernière version stable')) ?>)
-                </button>
-            </form>
-
-            <?php if (Auth::isLogged()): ?>
-                <form action="/ressource-detail?id=<?= $resourceId ?>" method="post" class="resource-detail__deploy-form">
-                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                    <input type="hidden" name="action" value="install_on_server">
-
-                    <label for="target-server-select" class="resource-detail__label">
-                        Installer directement sur l'un de mes serveurs Boötes :
-                    </label>
-                    <?php if (empty($userServers)): ?>
-                        <p class="resource-detail__notice">
-                            Vous n'avez aucun serveur actif. <a href="/user/compte">Créez un serveur depuis votre espace</a>.
-                        </p>
+                <div class="resource-detail__install">
+                    <h3 class="resource-detail__install-title"><?= View::icon('server') ?> Installer sur un serveur</h3>
+                    <?php if (!Auth::isLogged()): ?>
+                        <p class="resource-detail__info"><a href="/auth?mode=login">Connectez-vous</a> pour l'installer en un clic sur votre serveur.</p>
+                    <?php elseif (empty($userServers)): ?>
+                        <p class="resource-detail__info">Vous n'avez pas encore de serveur. <a href="/user/compte#section-serveurs">Créer un serveur</a></p>
                     <?php else: ?>
-                        <div class="resource-detail__deploy-controls">
+                        <form action="<?= Security::e($baseUrl) ?>" method="post" class="resource-detail__deploy-form">
+                            <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                            <input type="hidden" name="action" value="install_on_server">
+                            <label for="target-server-select" class="visually-hidden">Serveur cible</label>
                             <select id="target-server-select" name="target_server_id" required class="resource-detail__select">
                                 <?php foreach ($userServers as $srv): ?>
                                     <option value="<?= (int) $srv['id_serveur'] ?>">
@@ -324,137 +456,72 @@ if ($currentUserId !== null) {
                                     </option>
                                 <?php endforeach; ?>
                             </select>
-                            <button type="submit" class="resource-detail__btn resource-detail__btn--secondary">
-                                Installer sur ce serveur
-                            </button>
-                        </div>
+                            <button type="submit" class="resource-detail__btn resource-detail__btn--secondary"><?= View::icon('plus') ?> Installer</button>
+                        </form>
                     <?php endif; ?>
-                </form>
-            <?php else: ?>
-                <p class="resource-detail__login-prompt">
-                    <a href="/auth?mode=login">Connectez-vous</a> pour installer directement cette ressource sur votre serveur Minecraft en un clic.
-                </p>
-            <?php endif; ?>
-        </section>
-
-        <section class="resource-detail__versions-section" aria-labelledby="versions-heading">
-            <h2 id="versions-heading" class="resource-detail__section-title">Fichiers et versions compatibles</h2>
-            <?php if (empty($versionsList)): ?>
-                <p class="resource-detail__info">
-                    Version principale : <strong><?= Security::e((string) $resource['version_compatible']) ?></strong>
-                </p>
-            <?php else: ?>
-                <table class="versions-table">
-                    <caption class="versions-table__caption">Historique des versions de la ressource</caption>
-                    <thead class="versions-table__head">
-                        <tr class="versions-table__row">
-                            <th scope="col" class="versions-table__cell">Version</th>
-                            <th scope="col" class="versions-table__cell">Compatibilité MC</th>
-                            <th scope="col" class="versions-table__cell">Fichier</th>
-                            <th scope="col" class="versions-table__cell">Taille</th>
-                            <th scope="col" class="versions-table__cell">Date</th>
-                        </tr>
-                    </thead>
-                    <tbody class="versions-table__body">
-                        <?php foreach ($versionsList as $ver): ?>
-                            <tr class="versions-table__row">
-                                <td class="versions-table__cell"><?= Security::e((string) $ver['numero_version']) ?></td>
-                                <td class="versions-table__cell">MC <?= Security::e((string) $ver['version_mc']) ?></td>
-                                <td class="versions-table__cell"><?= Security::e((string) $ver['nom_fichier']) ?></td>
-                                <td class="versions-table__cell"><?= round(((int) $ver['taille_octets']) / 1024, 1) ?> Ko</td>
-                                <td class="versions-table__cell"><?= Security::e((string) $ver['date_ajout']) ?></td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            <?php endif; ?>
-        </section>
-
-        <section class="resource-detail__reviews-section" aria-labelledby="reviews-heading">
-            <h2 id="reviews-heading" class="resource-detail__section-title">Notes et avis de la communauté</h2>
-
-            <?php if (Auth::isLogged()): ?>
-                <form action="/ressource-detail?id=<?= $resourceId ?>" method="post" class="review-form">
-                    <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
-                    <input type="hidden" name="action" value="add_review">
-
-                    <div class="review-form__field">
-                        <label for="review-note" class="review-form__label">Votre note (sur 5)</label>
-                        <select id="review-note" name="note" required class="review-form__select">
-                            <option value="5">5 / 5 — Excellent</option>
-                            <option value="4">4 / 5 — Très bon</option>
-                            <option value="3">3 / 5 — Correct</option>
-                            <option value="2">2 / 5 — Insuffisant</option>
-                            <option value="1">1 / 5 — Déconseillé</option>
-                        </select>
-                    </div>
-
-                    <div class="review-form__field">
-                        <label for="review-comment" class="review-form__label">Votre avis détaillé</label>
-                        <textarea
-                            id="review-comment"
-                            name="commentaire"
-                            rows="3"
-                            minlength="5"
-                            maxlength="1000"
-                            required
-                            class="review-form__textarea"
-                        ></textarea>
-                    </div>
-
-                    <button type="submit" class="review-form__submit">Publier mon avis</button>
-                </form>
-            <?php endif; ?>
-
-            <?php if (empty($reviews)): ?>
-                <p class="resource-detail__empty-reviews">Aucun avis n'a encore été déposé sur cette ressource.</p>
-            <?php else: ?>
-                <div class="review-list">
-                    <?php foreach ($reviews as $rev): ?>
-                        <article class="review-card">
-                            <header class="review-card__header">
-                                <strong class="review-card__author"><?= Security::e((string) $rev['pseudo']) ?></strong>
-                                <span class="review-card__rating">Note : <?= (int) $rev['note'] ?> / 5</span>
-                                <time class="review-card__date" datetime="<?= Security::e((string) $rev['date_avis']) ?>">
-                                    <?= Security::e((string) $rev['date_avis']) ?>
-                                </time>
-                            </header>
-                            <p class="review-card__comment"><?= Security::e((string) $rev['commentaire']) ?></p>
-                        </article>
-                    <?php endforeach; ?>
                 </div>
-            <?php endif; ?>
-        </section>
+            </section>
 
-        <section class="resource-detail__report-section" aria-labelledby="report-heading">
+            <section class="resource-detail__card" aria-labelledby="facts-heading">
+                <h2 id="facts-heading" class="resource-detail__card-title">Informations</h2>
+                <dl class="resource-detail__facts">
+                    <dt>Type</dt>
+                    <dd><?= Security::e(View::label('type_ressource', $typeKey)) ?></dd>
+                    <dt>Minecraft</dt>
+                    <dd><?= Security::e((string) $resource['version_compatible']) ?></dd>
+                    <dt>Téléchargements</dt>
+                    <dd><?= View::number((int) $resource['nb_telechargements']) ?></dd>
+                    <dt>Note</dt>
+                    <dd><?= !empty($reviews) ? View::number($averageRating, 1) . ' / 5' : 'Pas encore notée' ?></dd>
+                    <dt>Publication</dt>
+                    <dd><?= Security::e(View::date((string) $resource['date_publication'])) ?></dd>
+                    <?php if ($latestFile !== null): ?>
+                        <dt>Mise à jour</dt>
+                        <dd><?= Security::e(View::date((string) $latestFile['date_ajout'])) ?></dd>
+                    <?php endif; ?>
+                    <dt>Statut</dt>
+                    <dd><?= View::badge('moderation', $resource['statut_moderation']) ?></dd>
+                </dl>
+            </section>
+
+            <?php if ($canModerate): ?>
+                <section class="resource-detail__card resource-detail__card--tools" aria-labelledby="tools-heading">
+                    <h2 id="tools-heading" class="resource-detail__card-title"><?= View::icon('settings') ?> <?= $isCreator ? 'Espace créateur' : 'Modération' ?></h2>
+                    <div class="resource-detail__moderation-actions">
+                        <a href="/user/createur-edition?id=<?= $resourceId ?>" class="resource-detail__btn"><?= View::icon('pencil') ?> Modifier</a>
+                        <a href="/user/createur-statistiques?id=<?= $resourceId ?>" class="resource-detail__btn"><?= View::icon('chart-column') ?> Statistiques</a>
+                        <form action="<?= Security::e($baseUrl) ?>" method="post" class="resource-detail__inline-form">
+                            <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
+                            <input type="hidden" name="action" value="moderate_delete">
+                            <button type="submit" class="resource-detail__btn resource-detail__btn--danger" data-confirm="Retirer cette ressource du catalogue public ?">
+                                <?= View::icon('ban') ?> Retirer du catalogue
+                            </button>
+                        </form>
+                    </div>
+                </section>
+            <?php endif; ?>
+
             <details class="report-box">
-                <summary id="report-heading" class="report-box__summary">Signaler cette ressource à la modération</summary>
+                <summary id="report-heading" class="report-box__summary"><?= View::icon('flag') ?> Signaler cette ressource</summary>
                 <?php if (Auth::isLogged()): ?>
-                    <form action="/ressource-detail?id=<?= $resourceId ?>" method="post" class="report-box__form">
+                    <form action="<?= Security::e($baseUrl) ?>" method="post" class="report-box__form">
                         <input type="hidden" name="csrf_token" value="<?= Security::e($csrfToken) ?>">
                         <input type="hidden" name="action" value="report">
 
                         <div class="report-box__field">
-                            <label for="report-motif" class="report-box__label">Motif du signalement</label>
+                            <label for="report-motif" class="report-box__label">Motif</label>
                             <select id="report-motif" name="motif" required class="report-box__select">
-                                <option value="MALWARE"> Code malveillant / Backdoor</option>
-                                <option value="COPYRIGHT">Violation de droits d'auteur / Plagiat</option>
+                                <option value="MALWARE">Code malveillant / porte dérobée</option>
+                                <option value="COPYRIGHT">Violation de droits d'auteur / plagiat</option>
                                 <option value="BROKEN">Archive corrompue ou non fonctionnelle</option>
-                                <option value="INAPPROPRIATE">Contenu inapproprié / Illégal</option>
+                                <option value="INAPPROPRIATE">Contenu inapproprié / illégal</option>
                             </select>
                         </div>
 
                         <div class="report-box__field">
-                            <label for="report-desc" class="report-box__label">Explications complémentaires</label>
-                            <textarea
-                                id="report-desc"
-                                name="description_signalement"
-                                rows="3"
-                                minlength="10"
-                                maxlength="1000"
-                                required
-                                class="report-box__textarea"
-                            ></textarea>
+                            <label for="report-desc" class="report-box__label">Explications</label>
+                            <textarea id="report-desc" name="description_signalement" rows="3" minlength="10" maxlength="1000" required
+                                      class="report-box__textarea"></textarea>
                         </div>
 
                         <button type="submit" class="report-box__submit">Envoyer le signalement</button>
@@ -465,6 +532,6 @@ if ($currentUserId !== null) {
                     </p>
                 <?php endif; ?>
             </details>
-        </section>
+        </div>
     </div>
 </article>
