@@ -11,7 +11,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Vérifie que le secret GEMINI_API_KEY existe : sans lui, la revue est sautée au
+  # lieu d'échouer (le contexte « secrets » est interdit dans le « if » d'un job).
+  gemini-key:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - name: Check GEMINI_API_KEY secret
+        id: check
+        env:
+          PRESENT: ${{ secrets.GEMINI_API_KEY != '' }}
+        run: |
+          echo "present=$PRESENT" >> "$GITHUB_OUTPUT"
+          if [ "$PRESENT" != "true" ]; then
+            echo "::notice title=Revue Gemini sautée::Secret GEMINI_API_KEY absent (Settings > Secrets and variables > Actions)."
+          fi
+
   gemini-review:
+    needs: gemini-key
+    if: needs.gemini-key.outputs.present == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 7
 
